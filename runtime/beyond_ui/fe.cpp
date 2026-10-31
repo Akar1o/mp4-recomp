@@ -451,8 +451,9 @@ static void page_display() {
 }
 
 static void page_graphics() {
-    page_title("GRAPHICS", "Resolution, renderer and image quality.");
+    page_title("GRAPHICS", "Resolution, upscaling, renderer and image quality.");
     section("RESOLUTION"); resolution_rows(false);
+    section("UPSCALING"); draw_opt("upscaler"); if (get("upscaler") == "fsr") draw_opt("fsr_sharpness");
     section("RENDERER"); draw_opt("renderer", get("renderer") == "vulkan_native" ? "EXPERIMENTAL" : nullptr);
 #ifndef SWR_RELEASE   // the public release's renderer has no DLSS
     if (get("renderer") != "vulkan" && file_exists(join(P.exedir, "nvngx_dlss.dll"))) {   // OpenGL and Native Vulkan
@@ -469,7 +470,7 @@ static void page_graphics() {
 }
 
 static void page_gameplay() {
-    page_title("GAMEPLAY", "Frame rate, cinematics and loading.");
+    page_title("GAMEPLAY", "Frame rate, cinematics, loading, camera and cheats.");
     section("FRAME RATE"); draw_opt("fps_limit"); draw_opt("forced_vsync"); draw_opt("show_fps");
     section("SCENES"); draw_opt("loading_60fps"); draw_opt("cutscenes_60fps");
 #ifndef SWR_NO_SKIPCUT
@@ -477,6 +478,8 @@ static void page_gameplay() {
 #endif
    
     section("LOADING AND RIDES"); draw_opt("fast_loading"); draw_opt("fast_forward"); if (getb("fast_forward")) draw_opt("fast_forward_speed");
+    section("CAMERA"); draw_opt("fov");
+    section("CHEATS"); draw_opt("cheats");
 }
 
 static void page_audio() {
