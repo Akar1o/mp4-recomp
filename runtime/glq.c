@@ -197,7 +197,7 @@ static void e_swap(void* p){
   {extern int g_opt_vsync;extern void backend_gl_vsync(int);static int vs=-1;if(vs!=g_opt_vsync){vs=g_opt_vsync;backend_gl_vsync(vs);}}   /* forced_vsync applies live */
   {extern void gpu_gl_fps_overlay(void);gpu_gl_fps_overlay();}   /* [Graphics] show_fps */
   {extern void gpu_gl_skip_prompt(void);gpu_gl_skip_prompt();}   /* "Hold (-) to skip" during a skippable cutscene */
-  {extern void ov_gl_frame(void);ov_gl_frame();}   /* in-game menu (dread_ui/ov.cpp) over the finished picture */
+  {extern void ov_gl_frame(void);ov_gl_frame();}   /* in-game menu (beyond_ui/ov.cpp) over the finished picture */
   u64 begin=trace?plat_ns():0;backend_gl_swap();
   u64 completed=__atomic_add_fetch(&g_swaps_done,1,__ATOMIC_SEQ_CST); q_done_signal();
   {pm_lock(&g_qm);pc_broadcast(&g_swap_cv);pm_unlock(&g_qm);}
@@ -271,7 +271,11 @@ static void gl_thread(void* arg){ plat_diag_role("GL-driver"); (void)arg; trace_
       QHdr* hd=(QHdr*)(g_q+t%Q_CAP); u32 sz=hd->size;
       void* executed=(void*)hd->ex;u64 operation_start=0;int upload_info[8]={0};int image_upload=0;
       if(trace_driver){if(hd->ex==q_sync_ex)executed=(void*)(*(QSync**)hd->data)->ex;if(executed==trace_upload_2d||executed==trace_compressed_2d){memcpy(upload_info,hd->data,sizeof upload_info);image_upload=1;}operation_start=plat_ns();}
-      hd->ex(hd->data);
+      { u64 x0=plat_ns(); hd->ex(hd->data); u64 dx=plat_ns()-x0;
+        if(dx>20000000ull){ static int said; if(said<60){ said++; const char* nm="?"; void* fx=(void*)hd->ex;
+            if(fx==(void*)q_sync_ex){ nm="sync"; QSync* qs=*(QSync**)hd->data; fx=(void*)qs->ex; }
+            for(const GlqEnt* e=g_glq_tab;e->name;e++) if(e->execute==fx){ nm=e->name; break; }
+            LOG("glq: %s took %.1f ms on the GL thread (fn +%lld)\n",nm,dx/1e6,(long long)((char*)fx-(char*)(void*)glq_start)); } } }
       if(trace_driver){u64 elapsed=plat_ns()-operation_start;static u32 logged;if(elapsed>10000000ull&&executed!=(void*)e_swap&&logged++<256){const char*name=hd->ex==e_swap?"SwapBuffers":"queue/custom";for(const GlqEnt*entry=g_glq_tab;entry->name;entry++)if(entry->execute==executed){name=entry->name;break;}LOG("glq driver: %s %.2f ms, queued bytes=%llu begin_ns=%llu end_ns=%llu\n",name,elapsed/1e6,(unsigned long long)(__atomic_load_n(&g_qh,__ATOMIC_ACQUIRE)-t),(unsigned long long)operation_start,(unsigned long long)(operation_start+elapsed));if(image_upload)LOG("glq upload detail: level=%d %dx%d format=%x %s=%x\n",upload_info[1],upload_info[4],upload_info[5],upload_info[6],executed==trace_compressed_2d?"bytes":"type",upload_info[7]);}}
       if(hd->big) free(hd->data);
       t+=sz; __atomic_store_n(&g_qt,t,__ATOMIC_RELEASE);
@@ -287,3 +291,30 @@ int glq_start(void){
   if(!g_start_ok) return -1;
   g_active=1; LOG("gpu: OpenGL calls run on their own thread (the GPU thread and the driver work at the same time)\n");
   return 1; }
+
+/* ---------- reads into a bound GL_PIXEL_PACK_BUFFER: the pointer is an offset, so they can be queued without waiting
+   for the GL thread (the generated wrappers sync, as they can't tell a PBO read from a client-memory one) */
+typedef void (APIENTRY *T_rp)(GLint,GLint,GLsizei,GLsizei,GLenum,GLenum,void*); extern T_rp r_glReadPixels;
+typedef void (APIENTRY *T_gti)(GLenum,GLint,GLenum,GLenum,void*); extern T_gti r_glGetTexImage;
+typedef struct { GLint x, y; GLsizei w, h; GLenum f, t; uintptr_t off; } APR;
+typedef struct { GLenum tg; GLint lv; GLenum f, t; uintptr_t off; } APT;
+static void e_rp_pbo(void* p){ APR* a=p; r_glReadPixels(a->x,a->y,a->w,a->h,a->f,a->t,(void*)a->off); }
+static void e_gti_pbo(void* p){ APT* a=p; r_glGetTexImage(a->tg,a->lv,a->f,a->t,(void*)a->off); }
+void glq_read_pixels_pbo(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum t, uintptr_t off){
+  if(!g_active || t_glq_direct){ ((T_rp)backend_gl_proc("glReadPixels"))(x,y,w,h,f,t,(void*)off); return; }
+  APR* a=glq_alloc(sizeof *a,0,e_rp_pbo); a->x=x; a->y=y; a->w=w; a->h=h; a->f=f; a->t=t; a->off=off; glq_commit(); }
+void glq_get_tex_image_pbo(GLenum tg, GLint lv, GLenum f, GLenum t, uintptr_t off){
+  if(!g_active || t_glq_direct){ ((T_gti)backend_gl_proc("glGetTexImage"))(tg,lv,f,t,(void*)off); return; }
+  APT* a=glq_alloc(sizeof *a,0,e_gti_pbo); a->tg=tg; a->lv=lv; a->f=f; a->t=t; a->off=off; glq_commit(); }
+
+/* compressed uploads from a bound GL_PIXEL_UNPACK_BUFFER (the data pointer is an offset into it) */
+typedef void (APIENTRY *T_cts2)(GLenum,GLint,GLint,GLint,GLsizei,GLsizei,GLenum,GLsizei,const void*); extern T_cts2 r_glCompressedTexSubImage2D;
+typedef void (APIENTRY *T_cts3)(GLenum,GLint,GLint,GLint,GLint,GLsizei,GLsizei,GLsizei,GLenum,GLsizei,const void*); extern T_cts3 r_glCompressedTexSubImage3D;
+typedef struct { GLenum tg; GLint lv, x, y, z; GLsizei w, h, d; GLenum f; GLsizei n; uintptr_t off; int is3d; } ACU;
+static void e_cu_pbo(void* p){ ACU* a=p;
+  if(a->is3d) r_glCompressedTexSubImage3D(a->tg,a->lv,a->x,a->y,a->z,a->w,a->h,a->d,a->f,a->n,(const void*)a->off);
+  else r_glCompressedTexSubImage2D(a->tg,a->lv,a->x,a->y,a->w,a->h,a->f,a->n,(const void*)a->off); }
+void glq_compressed_sub_pbo(int is3d, GLenum tg, GLint lv, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLenum f, GLsizei n, uintptr_t off){
+  ACU v={tg,lv,x,y,z,w,h,d,f,n,off,is3d};
+  if(!g_active || t_glq_direct){ if(is3d) ((T_cts3)backend_gl_proc("glCompressedTexSubImage3D"))(tg,lv,x,y,z,w,h,d,f,n,(const void*)off); else ((T_cts2)backend_gl_proc("glCompressedTexSubImage2D"))(tg,lv,x,y,w,h,f,n,(const void*)off); return; }
+  ACU* a=glq_alloc(sizeof *a,0,e_cu_pbo); *a=v; glq_commit(); }

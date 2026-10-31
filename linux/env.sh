@@ -1,11 +1,11 @@
 #!/bin/bash
 # Linux build: shared settings, sourced by the other scripts. Everything stays inside the repository (as on Windows):
 #   bin/runtime_linux_x11          the runtime                      (setup_and_build_runtime.sh)
-#   games/Metroid Dread*           the installed game folder        (setup_game.sh)
+#   games/Metroid Prime 4 Beyond*           the installed game folder        (setup_game.sh)
 #   linux/test/                    test copies of the game folder   (make_test_game.sh)
 # SWR_GAMES and SWR_TEST move the last two (for example to a bigger disk).
 W=${SWR_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}   # the repository (this script is in linux/)
-NAME="Metroid Dread"
+NAME="Metroid Prime 4 Beyond"
 RUNTIME="$W/bin/runtime_linux_x11"
 GAMES=${SWR_GAMES:-$W/games}
 TEST=${SWR_TEST:-$W/linux/test}

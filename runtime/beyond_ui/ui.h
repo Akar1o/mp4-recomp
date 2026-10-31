@@ -1,4 +1,4 @@
-// Metroid Dread front end and in-game menu: shared theme, widgets and the settings table.
+// Metroid Prime 4 Beyond front end and in-game menu: shared theme, widgets and the settings table.
 // Original design: dark translucent panels, cyan lines, red accents, Bahnschrift (a Windows font, not bundled).
 #pragma once
 #include "imgui.h"

@@ -28,7 +28,7 @@ See **Build from source** in the README, or run `build.bat` from the repository 
 ## Rules
 
 - **No Nintendo files.** No game code, RomFS files, keys, generated C, textures or other assets, not even small
-  ones. Edits to the generated code go through `dread/dread_v210_patches.json` (`dread/make_patches.py`), which
+  ones. Edits to the generated code go through `beyond/beyond_patches.json` (`beyond/make_patches.py`), which
   stores only our replacement lines and hashes.
 - **Don't change the game's timing.** The 60 Hz tick, physics and the game's own waits and sleeps stay as they are.
   Higher frame rates and faster loading are opt-in settings, never the default.

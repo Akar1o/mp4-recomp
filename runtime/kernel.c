@@ -304,12 +304,14 @@ cv_registered:
   else r=t->wait_result;
   pm_unlock(&g_klock); return r; }
 
+static volatile u64 g_main_waker;
 static u32 svc_signal_cv(u64 key, i32 count){
   pm_lock(&g_klock);
   int n=0;
   while(count<=0 || n<count){
     KThread* w=wl_best(3,key); if(!w) break;
     wl_del(w); n++;
+    if(w->is_main){ KThread* me=kthread_cur(); g_main_waker= me? me->id : 0; }   /* for the stall report */
     u64 ma=w->wait_addr;
     for(;;){
       u32 v=__atomic_load_n(U32(ma),__ATOMIC_SEQ_CST);
@@ -650,7 +652,7 @@ void kernel_dump_regs(CPU* c){
       for(int w=0;w<16;w++) n+=snprintf(line+n,sizeof line-n," %08x",gr32(base+w*4));
       WARN("%s\n",line); } }
   /* what the regs point at (objects, vtables) */
-  for(int r=0;r<29;r++){ u64 a=c->x[r]; if(a<0x10000 || a>=AS_SIZE-64 || (a&7)) continue; MemBlock b; mem_query(a,&b); if(b.state==MS_FREE || b.state==MS_INACCESSIBLE) continue;
+  for(int r=0;r<29;r++){ u64 a=c->x[r]; if(a<0x10000 || a>=AS_SIZE-64 || (a&3)) continue;   /* 4-aligned too: handles and small structs */ MemBlock b; mem_query(a,&b); if(b.state==MS_FREE || b.state==MS_INACCESSIBLE) continue;
     WARN("  mem x%d %llx: %llx %llx %llx %llx\n",r,(unsigned long long)a,(unsigned long long)gr64(a),(unsigned long long)gr64(a+8),(unsigned long long)gr64(a+16),(unsigned long long)gr64(a+24));
     u64 v=gr64(a); if(v>=0x10000 && v<AS_SIZE-64 && !(v&7)){ MemBlock vb; mem_query(v,&vb); if(vb.state!=MS_FREE && vb.state!=MS_INACCESSIBLE){
       { char sl[1200]; int n=0; for(int e=0;e<8;e++){ const char* s=gsym(gr64(v+e*8)); if(s[0]) n+=snprintf(sl+n,sizeof sl-n," [%d]%s",e,s); if(n>1000) break; } if(n) WARN("    vtable:%s\n",sl); }
@@ -711,7 +713,7 @@ static void trace_main_call(KThread*t,CPU*c,u32 svc,u64 caller,u64 start,u64 obj
   if(svc_trace_file && start){u64 end=plat_ns();if(end-start>=(u64)svc_trace_ms*1000000ull){fprintf(svc_trace_file,"%llu,%x,%llx,%llu,%llu,%.6f,%llx,%llx,%llx\n",(unsigned long long)t->id,svc,(unsigned long long)caller,(unsigned long long)start,(unsigned long long)end,(end-start)/1e6,(unsigned long long)object,(unsigned long long)c->x[0],(unsigned long long)c->x[29]);fflush(svc_trace_file);}}
   if(!t->is_main)return;static u64 threshold; if(!threshold){const char*e=getenv("SWR_TRACE_MAIN_STALL_MS");int ms=e?atoi(e):50;if(ms<1||ms>1000)ms=50;threshold=(u64)ms*1000000ull;}
   u64 elapsed=plat_ns()-start;if(elapsed<threshold)return;
-  LOG("main stall: svc=%x caller=%llx %.2f ms object=%llx\n",svc,(unsigned long long)caller,elapsed/1e6,(unsigned long long)object);
+  LOG("main stall: svc=%x caller=%llx %.2f ms object=%llx (condvar woken by thread %llu)\n",svc,(unsigned long long)caller,elapsed/1e6,(unsigned long long)object,(unsigned long long)g_main_waker);
   u64 fp=c->x[29];for(int k=0;k<8&&fp;k++){MemBlock b;mem_query(fp,&b);if(!(b.perm&PERM_R)||fp<b.addr||fp+16>b.addr+b.size)break;u64 next=gr64(fp),ret=gr64(fp+8);LOG("main stall: stack[%d]=%llx\n",k,(unsigned long long)ret);if(next<=fp)break;fp=next;}
 }
 void swr_svc(CPU* c, u32 imm){
@@ -898,6 +900,8 @@ void kernel_dump_threads(void){
     if(k==1) LOG(" [%s%s]", t->wait_name? t->wait_name : "?", t->wait_timeout<0? "" : " with timeout");
     if(k>=2) LOG(" [addr %llx value %x]", (unsigned long long)t->wait_addr, gr32(t->wait_addr));
     LOG("  lr=%llx pc=%llx sp=%llx\n",(unsigned long long)t->cpu.x[30],(unsigned long long)t->cpu.pc,(unsigned long long)t->cpu.x[31]);
+    if(k==0){ LOG("    regs:"); for(int r=19;r<29;r++) LOG(" x%d=%llx",r,(unsigned long long)t->cpu.x[r]); u64 a26=t->cpu.x[26];
+      if(a26>=AS_BASE && a26<AS_SIZE && !(a26&3)){ MemBlock b; mem_query(a26,&b); if(b.state!=MS_FREE && b.state!=MS_INACCESSIBLE) LOG("  [x26]=%x",gr32(a26)); } LOG("\n"); }
     { u64 fp=t->cpu.x[29]; LOG("    stack:");
       for(int i=0;i<10 && fp>=AS_BASE && fp<AS_SIZE && !(fp&7);i++){ MemBlock b; mem_query(fp,&b); if(b.state==MS_FREE || b.state==MS_INACCESSIBLE) break;
         LOG(" %llx",(unsigned long long)gr64(fp+8)); fp=gr64(fp); }

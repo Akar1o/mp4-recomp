@@ -136,7 +136,7 @@ static void aoutput(const i16*pcm){
      time like the controllers (backend_x11.c). Same format and the same cap as the Windows path: 32 chunks of
      5 ms queued at most, a chunk past that is dropped rather than letting latency grow */
   typedef struct { int freq; u16 format; u8 channels, silence; u16 samples, padding; u32 size; void* callback; void* userdata; } SdlSpec;
-  static int attempted; static u32 dev; static u64 writes, dropped;
+  static int attempted; static u32 dev; static u64 writes, dropped, dry;   /* dry: the device had played everything (an audible gap) */
   static int (*init_sub)(u32); static u32 (*open_dev)(const char*,int,const SdlSpec*,SdlSpec*,int);
   static void (*pause_dev)(u32,int); static int (*queue)(u32,const void*,u32); static u32 (*queued)(u32);
   if(!attempted){ attempted=1;
@@ -152,8 +152,13 @@ static void aoutput(const i16*pcm){
         else WARN("audio: SDL2 could not open an output device\n"); }
       else WARN("audio: no sound (libSDL2-2.0.so.0 not found or its audio failed to start)\n"); } }
   if(dev){
-    if(queued(dev) < 32u*AF*4u){ if(queue(dev,pcm,AF*4)==0) writes++; } else dropped++;
-    if(writes && writes%2000==0) LOG("audio: %llu chunks queued, %llu overflow drops\n",(unsigned long long)writes,(unsigned long long)dropped); }
+    /* the game hands over 5 ms at a time, as fast as it plays: with nothing queued ahead, any delay on the game's audio
+       thread left the device empty (1949 of 2000 chunks in the intro found the queue empty: crackle and gaps). Keep a
+       cushion: 20 ms of silence in front whenever the queue has run empty, then it stays about that deep */
+    u32 q=queued(dev); if(writes>50 && q==0) dry++;
+    if(q==0){ static const short silence[AF*2]; for(int k=0;k<4;k++) queue(dev,silence,AF*4); q=4u*AF*4u; }
+    if(q < 32u*AF*4u){ if(queue(dev,pcm,AF*4)==0) writes++; } else dropped++;
+    if(writes && writes%2000==0) LOG("audio: %llu chunks queued, %llu overflow drops, %llu underruns (the output ran dry)\n",(unsigned long long)writes,(unsigned long long)dropped,(unsigned long long)dry); }
 #else
   (void)pcm;
 #endif
@@ -280,6 +285,8 @@ static void aroute_trace(ARenderer*r,const u32*ih,const u8*input,u64 size,const 
 }
 extern int g_opt_audio_eos_sample_count;
 static void audio_eos_env(void){ static int done; if(!done){ done=1; if(getenv("SWR_AUDIO_OLD_EOS")) g_opt_audio_eos_sample_count=0; } }   /* tests only */
+/* 1: take the update's voice changes and report status, but mix nothing (main.c audren_update: no 5 ms has passed) */
+int g_audio_status_only;
 void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,u32 count,u8*status){
   audio_eos_env();
   if(!o->u[4]){ARenderer*r=calloc(1,sizeof *r);if(!r)return;r->voices=calloc(AV,sizeof(AVoice));r->samples=calloc(AM*24*AF,sizeof(float));if(!r->voices||!r->samples){free(r->voices);free(r->samples);free(r);return;}o->u[4]=(u64)(size_t)r;}
@@ -296,7 +303,7 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
       for(u8 n=vi[0x159];n&&v->nq;n--){apop(v);v->position=0;}
       if(play==1&&v->was_playing){atrace_voice("stop",id,v,vi,NULL);aclear(v,1);memset(v->filter,0,sizeof v->filter);}
       v->was_playing=play!=1;
-      if(play==0&&v->nq&&o->u[3]==0){active++;u32 rate=au32(vi+0xC);float pitch=af32(vi+0x1C),volume=af32(vi+0x20);if(!rate||rate>192000)rate=48000;if(!(pitch>0)||pitch>8)pitch=1;
+      if(play==0&&v->nq&&o->u[3]==0&&!g_audio_status_only){active++;u32 rate=au32(vi+0xC);float pitch=af32(vi+0x1C),volume=af32(vi+0x20);if(!rate||rate>192000)rate=48000;if(!(pitch>0)||pitch>8)pitch=1;
         double step=(double)rate*pitch/48000.0;u32 mix=au32(vi+0x58);if(mix>=AM)mix=0;u32 nc=r->mix[mix].valid?r->mix[mix].count:2;if(nc>24)nc=24;
         if(!r->logged_voice){r->logged_voice=1;LOG("audio: first voice %u, format %u, %u channels, %u Hz, volume %.3f, mix %u, %u buffers\n",id,vi[0xB],au32(vi+0x18),rate,volume,mix,v->nq);}
         for(int n=0;n<AF&&v->nq;n++){ABuffer*b=&v->q[0];u32 at=(u32)v->position;if(at>=b->frames)at=b->frames-1;u32 next=at+1;if(next>=b->frames)next=b->loop?0:at;float fraction=(float)(v->position-at);
@@ -314,6 +321,7 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
     }
     memcpy(status+i*16,&v->played,8);memcpy(status+i*16+8,&v->consumed,4);
   }
+  if(g_audio_status_only) return;   /* no time passed: nothing mixed, nothing output */
   /* Route leaves towards the final mix in dependency order. Cycles and
      invalid destinations are ignored instead of recursively feeding audio. */
   u8 done[AM]={0};done[0]=1;

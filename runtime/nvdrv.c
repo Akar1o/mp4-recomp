@@ -126,7 +126,7 @@ void nv_events_check(void){
 
 /* ============================================================ files (fds) */
 enum { DEV_NONE, DEV_NVMAP, DEV_AS, DEV_CTRL, DEV_CTRLGPU, DEV_GPU, DEV_NVDEC, DEV_VIC, DEV_OTHER };
-u32 host1x_ioctl(int is_vic, u32 cmd, u8* d, u32 n);
+u32 host1x_ioctl(int is_vic, u32 chan, u32 cmd, u8* d, u32 n);
 typedef struct { int dev; u32 syncpt; u64 user_data; u32 class_ids[8]; int nclass; KEvent* ev_sm, *ev_err; } NvFile;
 static NvFile nvf[256];
 
@@ -264,7 +264,7 @@ static u32 ioctl_gpu(NvFile* f, u32 cmd, u8* d, u32 n, u8* extra, u32 nextra){
         pm_lock(&g_sync_lk); if((i32)(syncpt_max[f->syncpt]-syncpt[f->syncpt])<0) syncpt_max[f->syncpt]=syncpt[f->syncpt]; syncpt_max[f->syncpt]+=incs; u32 promised=syncpt_max[f->syncpt];
         snxvk_submit(entries,num,f->syncpt,host,wait_id,fval,promised); pm_unlock(&g_sync_lk);
         fid=f->syncpt; fval=promised; memcpy(d+16,&fid,4); memcpy(d+20,&fval,4); return 0; }
-      if(flags&1){ syncpt_wait(fid,fval,2000000000); }
+      if(flags&1){ u64 t0=plat_ns(); syncpt_wait(fid,fval,2000000000); u64 dt=plat_ns()-t0; static int said; if(dt>10000000ull && said<40){ said++; LOG("nvdrv: submit on syncpoint %u waited %.1f ms for fence %u >= %u\n",f->syncpt,dt/1e6,fid,fval); } }
       u32 incs=((flags&2)? 2 : 0)+((flags&0x100)? fval : 0);
       pm_lock(&g_sync_lk); if((i32)(syncpt_max[f->syncpt]-syncpt[f->syncpt])<0) syncpt_max[f->syncpt]=syncpt[f->syncpt]; syncpt_max[f->syncpt]+=incs; u32 promised=syncpt_max[f->syncpt]; pm_unlock(&g_sync_lk);
       gpu_submit(entries,num,f->syncpt,incs);
@@ -309,8 +309,8 @@ static int nvdrv_disp(SvcObj* o, IpcCtx* c){
         case DEV_CTRL: r=ioctl_ctrl(cmd,tmp,nb); break;
         case DEV_CTRLGPU: r=ioctl_ctrlgpu(cmd,tmp,nb,(c->cmd==12&&ea)? GP(ea):NULL,(u32)es); break;
         case DEV_GPU: r=ioctl_gpu(f,cmd,tmp,(u32)(isz>nb?isz:nb),ea? GP(ea):NULL,(u32)es); break;
-        case DEV_NVDEC: r=host1x_ioctl(0,cmd,tmp,(u32)(isz>nb?isz:nb)); break;
-        case DEV_VIC: r=host1x_ioctl(1,cmd,tmp,(u32)(isz>nb?isz:nb)); break;
+        case DEV_NVDEC: r=host1x_ioctl(0,(u32)fd,cmd,tmp,(u32)(isz>nb?isz:nb)); break;
+        case DEV_VIC: r=host1x_ioctl(1,(u32)fd,cmd,tmp,(u32)(isz>nb?isz:nb)); break;
         default: WARN("nvdrv: ioctl %x to unknown device\n",cmd); break;
       }
       if(oa) memcpy(GP(oa),tmp,osz>need? need : osz);

@@ -1,0 +1,14 @@
+# FOV hooks for the [Gameplay] fov setting (runtime/cheats.c). Setup copies this file into <game>_data/; a file
+# <game>_data/cheats/<BUILD ID>.fov with the same line format takes priority (to try a hook without rebuilding).
+#
+# One line per game build:  BUILD_ID  region+offset  [pointer offsets ...]
+#   BUILD_ID     the first 16 hex digits of main's build id (the name of the cheat file)
+#   region       main, heap, alias or aslr, as in Atmosphere cheats; offset in hex
+#   pointers     optional chain: read the 64-bit pointer at the address, add the next offset, repeat
+# The final address holds the camera's field of view as a float in degrees. Each update the game's own value is
+# multiplied by fov/100; a value the game writes later (a new camera) is picked up and scaled the same way.
+#
+# Example (made-up numbers):  8275FBE1EC5191C2 main+1A2B3C0 48 1F0
+#
+# Metroid Prime 4 Beyond, build 8275FBE1EC5191C2: not found yet. A memory search for the camera's FOV float (around
+# 60-80 while walking, changing when zooming with the visor) gives the pointer chain to put here.

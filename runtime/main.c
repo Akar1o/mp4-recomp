@@ -13,7 +13,7 @@ GuestFn swr_interp_entry;
 char g_datadir[1024], g_exename[256], g_exedir[1024];
 volatile int g_quit;
 int g_frames;
-int g_opt_video_async_retire=0,g_opt_video_avx2=0,g_opt_video_block_copy=0;
+int g_opt_video_async_retire=0,g_opt_video_avx2=1,g_opt_video_block_copy=1;   /* both checked byte for byte against the plain versions */
 int g_present_pacing_candidate;
 int g_opt_audio_surround_downmix=0;
 /* FPS counter ([Graphics] show_fps): a seven-segment "123 FPS" in the top-left corner as plain rectangles, so every
@@ -93,7 +93,15 @@ char g_opt_button_icons[16]="auto";
 int g_opt_mouse_aim=1, g_opt_mouse_sens=100;   /* [Input] mouse free aim (backend_win32.c mouse_apply) */
 char g_opt_mouse_buttons[64]="y,l,r,-,-";   /* left, right, middle, back, forward -> Switch buttons */   /* [Input] button_icons: auto, switch, xbox, ps4, ps5 (svc_fs.c romfs_apply_mods) */   /* [Input]: api 0 auto, 1 SDL2, 2 XInput */
 int g_opt_diag=0;
-int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=0, g_opt_drs=0;
+/* vsync: on by default off Windows. Without it the 60.00 FPS limiter beats against the display (59.95 Hz here): about once a
+   second a frame came in the same refresh as the one before and the next refresh showed the old one again (59 of 3600
+   frames in the intro, 2 with vsync) */
+#ifdef _WIN32
+#define VSYNC_DEFAULT 0
+#else
+#define VSYNC_DEFAULT 1
+#endif
+int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=VSYNC_DEFAULT, g_opt_drs=0;
 int g_opt_media_turns=1;   /* serialize_media_threads, read by kernel.c core0_member */
 int g_opt_fast_load=0;     /* fast_loading, read by kernel.c SleepThread */
 int g_opt_sleep_waits=1;   /* sleep_waits, read by glq.c */
@@ -325,6 +333,9 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"shadows")) g_opt_shadows=atoi(v);
     else if(!strcmp(k,"profile")) g_opt_prof=atoi(v);
     else if(!strcmp(k,"low_priority_shader_compiler")) g_opt_cmp_low=atoi(v);
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    else if(!strcmp(k,"shader_threads")){ extern int g_opt_shader_threads; g_opt_shader_threads=atoi(v); if(g_opt_shader_threads<0) g_opt_shader_threads=0; if(g_opt_shader_threads>8) g_opt_shader_threads=8; }   /* backend_x11.c */
+#endif
     else if(!strcmp(k,"dynamic_resolution")) g_opt_resdyn=atoi(v);
     else if(!strcmp(k,"dynamic_resolution_min")){ g_opt_resmin=(float)atof(v); if(g_opt_resmin<0.25f) g_opt_resmin=0.25f; if(g_opt_resmin>1) g_opt_resmin=1; }
     else if(!strcmp(k,"forced_vsync")) g_opt_vsync=atoi(v);
@@ -337,9 +348,13 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"hdr_paper_white")){ g_opt_hdr_paper=atoi(v); if(g_opt_hdr_paper<80) g_opt_hdr_paper=80; if(g_opt_hdr_paper>1000) g_opt_hdr_paper=1000; }
     else if(!strcmp(k,"hdr_peak")){ g_opt_hdr_peak=atoi(v); if(g_opt_hdr_peak<0) g_opt_hdr_peak=0; if(g_opt_hdr_peak>10000) g_opt_hdr_peak=10000; }
     else if(!strcmp(k,"prebuild_shaders")){ extern int g_opt_prebuild; g_opt_prebuild=atoi(v); }   /* gpu_gl.c prebuild_shaders */
+    else if(!strcmp(k,"upscaler")){ extern int g_opt_upscaler; g_opt_upscaler=!strcmp(v,"fsr"); }   /* gpu_gl.c fsr_draw, live */
+    else if(!strcmp(k,"fsr_sharpness")){ extern int g_opt_fsr_sharp; g_opt_fsr_sharp=atoi(v); if(g_opt_fsr_sharp<0) g_opt_fsr_sharp=0; if(g_opt_fsr_sharp>100) g_opt_fsr_sharp=100; }
     else if(!strcmp(k,"antialiasing")){ extern int g_opt_aa; g_opt_aa=atoi(v)!=0; }
     else if(!strcmp(k,"sharpening")){ extern int g_opt_sharp; g_opt_sharp=atoi(v); if(g_opt_sharp<0) g_opt_sharp=0; if(g_opt_sharp>100) g_opt_sharp=100; }   /* gpu_gl.c present pass, snxvk hdr.c */   /* FXAA: gpu_gl.c present pass, snxvk hdr.c */
     else if(!strcmp(k,"show_fps")) g_opt_show_fps=atoi(v)!=0;   /* FPS counter, live */
+    else if(!strcmp(k,"cheats")){ extern int g_opt_cheats; g_opt_cheats=atoi(v)!=0; }   /* cheats.c, live */
+    else if(!strcmp(k,"fov")){ extern int g_opt_fov; g_opt_fov=atoi(v); if(g_opt_fov<60) g_opt_fov=60; if(g_opt_fov>160) g_opt_fov=160; }   /* cheats.c FOV hook, live */
 #ifndef SWR_NO_SKIPCUT
     else if(!strcmp(k,"skip_cutscenes")){ g_opt_skip_cut=atoi(v)!=0; env_switch("SWR_SKIP_CUTSCENES",g_opt_skip_cut); }   /* read by the game DLL (code_141.c F_906E2A0), live */
 #endif
@@ -371,7 +386,7 @@ static const IniOpt INI_DISPLAY[]={
   {"docked","0","1 = TV mode (1920x1080 / 1600x900 games), 0 = handheld mode (1280x720)"},
   {"fullscreen","1","1 = start in fullscreen (F11 or Alt+Enter toggles it in game)"},
   {"aspect","","Picture shape (docked mode): 16:9, 21:9 (= ultrawide=1) or 16:10 (1440x900 base, fills a Steam Deck\n;   1280x800 or a 1920x1200 screen). Empty = use ultrawide=; when set it overrides ultrawide="},
-  {"ultrawide","0","1 = 21:9 picture for ultrawide monitors (theboy181's 21:9 patch for Dread v2.1.0,\n;   github.com/theboy181/switch-ptchtxt-mods; minor cut-offs in videos and some menus). 0 = 16:9"},
+  {"ultrawide","0","Metroid Dread only (a patch for its v2.1.0 code): no effect on Metroid Prime 4 Beyond"},
   {"language","1","Game language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish,\n;   6 Chinese, 7 Korean, 8 Dutch, 10 Russian, 11 Taiwanese, 12 English (UK),\n;   13 French (Canada), 14 Spanish (Latin America)"},
   {NULL,NULL,NULL}};
 static const IniOpt INI_GRAPHICS[]={
@@ -383,13 +398,15 @@ static const IniOpt INI_GRAPHICS[]={
   {"skip_cutscenes","0","1 = hold - (or + then -) to skip any cutscene the game lets you skip, even the first time; a prompt shows top left"},
 #endif
   {"show_fps","0","1 = FPS counter in the top-left corner (frames that reach the screen)"},
+  {"upscaler","bilinear","How a picture smaller than the window is enlarged: bilinear, or fsr = AMD FidelityFX FSR 1\n;   (edge-adaptive upscaling + sharpening; OpenGL renderer). Pair it with resolution below 1, e.g. 0.67"},
+  {"fsr_sharpness","80","FSR 1 sharpening (RCAS), 0-100"},
   {"antialiasing","0","1 = smooth jagged edges (FXAA on the final picture; OpenGL and native Vulkan). Not needed at\n;   resolution above 1 (the downscale already averages) or with DLAA"},
   {"sharpening","0","0 = off, 1..100 = sharpen the final picture (contrast-adaptive, like AMD CAS; OpenGL and native Vulkan)"},
   {"anisotropy","0","Texture filtering at an angle: 0 = as the game asks, 2/4/8/16 = at least that much\n;   (sharper floors and walls seen at an angle; samplers are made at first use, so a change applies on the next start)"},
   {"hdr","0","1 = HDR output (renderer=vulkan_native, Windows HDR on): the game's picture on an HDR swapchain, highlights\n;   expanded toward the display's peak (like Windows Auto HDR). Falls back to SDR when the display offers no HDR"},
   {"hdr_paper_white","200","HDR output: brightness of normal (SDR white) content in nits (80-1000)"},
   {"hdr_peak","0","HDR output: brightest highlight in nits; 0 = what the display reports"},
-  {"prebuild_shaders","0","1 = before the game draws, build every shader the game ships (romfs/system/shd) into the\n;   shader cache, so they don't compile the first time they're used. The first start takes longer; later starts only\n;   look at changed files. Native Vulkan: the game's shaders are translated in the background at start and the\n;   pipeline recipes (vulkan_native/pipeline_recipes.bin) made from them"},
+  {"prebuild_shaders","1","1 = build every shader before the game draws with it: the shaders it ships in romfs/system/shd, and the ones\n;   it unpacks into GPU memory (Metroid Prime 4 at boot), compiled in the background and kept ready. 0 = at first use"},
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
 #ifndef SWR_RELEASE   /* the public release: no DLSS (GPL) and no frame generation in that build */
@@ -398,13 +415,20 @@ static const IniOpt INI_GRAPHICS[]={
   {NULL,NULL,NULL}};
 static const IniOpt INI_PERF[]={
   {"audio_surround_downmix","0","1 = include all six audio channels in stereo output (experimental)"},
+  {"cheats","1","1 = run the cheat codes that are on (Atmosphere format, <game>_data/cheats/<build id>.txt; turn them\n;   on and off in the in-game menu, Cheats page)"},
+  {"fov","100","Field of view in percent of the game's own (60-160, applies live). Needs a FOV hook for this game\n;   build (beyond/fov_hooks.txt)"},
   {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},
   {"video_async_retire","0","1 = retire obsolete video pictures on a bounded worker (experimental; restart required)"},
-  {"video_avx2","0","1 = exact AVX2 video color conversion when supported (experimental; restart required)"},
-  {"video_block_copy","0","1 = grouped video tiled-row copies (experimental; restart required)"},
+  {"video_avx2","1","1 = AVX2 video color conversion when the CPU has it (same result as the plain conversion, faster; restart required)"},
+  {"video_block_copy","1","1 = video pictures written to tiled memory 64 bytes at a time (same result, faster; restart required)"},
+#ifdef _WIN32
   {"forced_vsync","0","1 = always wait for vsync (can lower FPS a lot on slow PCs)"},
+#else
+  {"forced_vsync","1","1 = wait for vsync: frames reach the screen evenly (0 = no wait: can lower stutter-free FPS on slow PCs,\n;   but frames beat against the display's refresh and tear in fullscreen)"},
+#endif
   {"memory_gb","0","Memory the game sees: 0 = automatic (3.2 GB like the console, more for games that need it,\n;   e.g. Tears of the Kingdom), 4 = console (3.2 GB), 6 or 8 = extended (like yuzu's extended memory layout)"},
   {"low_priority_shader_compiler","1","1 = compile shaders at low priority (less stutter on weak CPUs)"},
+  {"shader_threads","0","Linux: threads that compile new shaders at the same time, 0 = automatic (a quarter of the CPU\n;   threads, 2 to 8), 1 = one like older versions (restart)"},
   {"fast_forward","0","1 = Tab (or both stick clicks, L3+R3) toggles fast forward: the game clock runs faster, e.g. to\n;   shorten elevator and train rides (their animations follow the clock). Turn it off again before playing"},
   {"fast_forward_speed","3","Fast forward speed, 2-8 times"},
   {"fast_loading","0","1 = shorten the game's fixed 60 ms pauses during loads and reloads to 1 ms (faster loading;\n;   0 = keep the console's original timing)"},
@@ -429,7 +453,7 @@ static const IniOpt INI_INPUT[]={
   {"mouse_aim","1","1 = mouse free aim: hold the right mouse button (the game's L, free aim) and move the mouse to aim\n;   in any direction; left click shoots (Y), middle click arms missiles (R). The cursor hides over the game"},
   {"mouse_sensitivity","100","mouse free aim: how far the mouse moves for a full turn of the aim, in percent (10-1000)"},
   {"mouse_buttons","y,l,r,-,-","mouse buttons left, right, middle, back, forward as Switch buttons: a b x y l r zl zr plus\n;   minus lstick rstick, - for none. The one set to l aims with the mouse while held"},
-  {"button_icons","auto","the game's button pictures: auto = from the controller connected at start (Xbox and Steam Deck:\n;   Xbox icons, DualShock 4: PS4, DualSense: PS5, Switch or none: the originals), or switch, xbox, ps4, ps5.\n;   Needs the icon packs in Metroid Dread_data\\mods (the Play screen downloads them: Controls > Button icons)"},
+  {"button_icons","auto","the game's button pictures: auto = from the controller connected at start (Xbox and Steam Deck:\n;   Xbox icons, DualShock 4: PS4, DualSense: PS5, Switch or none: the originals), or switch, xbox, ps4, ps5.\n;   Needs the icon packs in Metroid Prime 4 Beyond_data\\mods (the Play screen downloads them: Controls > Button icons)"},
   {"controller_api","auto","auto = SDL2 when SDL2.dll is next to the game (Bluetooth/USB Switch Pro, DualShock 4,\n;   DualSense, 8BitDo, Xbox...), else XInput. sdl or xinput to force one"},
   {"controller_index","0","0 = first connected controller, 1.. = that controller (in connection order) is player 1"},
   {"stick_deadzone","7000","stick dead zone (0..30000, out of 32767)"},
@@ -438,11 +462,11 @@ static const IniOpt INI_INPUT[]={
 static const IniOpt INI_AUDIO[]={
   {"volume","100","Master volume in percent (0-200, applies live)"},
   {NULL,NULL,NULL}};
-/* front end (dread_ui/fe.cpp) and in-game menu (dread_ui/ov.cpp); the runtime itself only stores them */
+/* front end (beyond_ui/fe.cpp) and in-game menu (beyond_ui/ov.cpp); the runtime itself only stores them */
 static const IniOpt INI_LAUNCHER[]={
   {"wait_for_shaders","1","1 = wait for new shaders before drawing (no missing objects, a short stutter the first time);\n;   0 = compile them in the background (no stutter, objects can pop in). Applies on the next start"},
   {"loading_60fps","1","1 = draw elevator, train and loading screens at 60 FPS (the game draws them at 30)"},
-  {"cutscenes_60fps","0","1 = 60 FPS cutscenes (port of theboy181's 60fps patch for Dread v2.1.0)"},
+  {"cutscenes_60fps","0","Metroid Dread only (a patch for its v2.1.0 code): no effect on Metroid Prime 4 Beyond"},
   {"skip_launcher","0","1 = start the game directly, without the Play screen"},
   {"menu_shortcut","home","Controller button that opens the in-game menu (F1 on the keyboard always works):\n;   home = Home / Guide / PS button, minus_plus = - and + together, l3_r3 = both stick clicks held 1 second"},
   {"launcher_nav","1","1 = navigate the Play screen and menus with a controller"},
@@ -476,7 +500,7 @@ void ini_write(void){
   if(!g_ini_path[0]) return;
   char tmp[1450]; snprintf(tmp,sizeof tmp,"%s.tmp",g_ini_path); FILE* f=fopen(tmp,"w"); if(!f) return;
   fprintf(f,"; =====================================================================\n");
-  fprintf(f,";  Metroid Dread - settings\n");
+  fprintf(f,";  Metroid Prime 4 Beyond - settings\n");
   fprintf(f,";  Edit a value and save: most settings apply live while the game runs\n");
   fprintf(f,";  (docked, language, fullscreen and frame generation apply on restart).\n");
   fprintf(f,";  Keys in game: F1 menu, F3 screenshot, F4 FPS limit, F5 trace,\n");
@@ -600,6 +624,10 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   { static int once; if(!once){ once=1; if(getenv("SWR_VT")) vt_set(1); } }   /* test smooth clock w/o recording */
   if(limiter_trace)trace_enqueued=plat_ns();
   g_frames++; vt_frame();
+  { /* SWR_VIDEO_TIMING=1: how evenly frames reach the screen, every 120 presents: average, worst and late (> 20 ms) */
+    static int timing=-1; static u64 last, sum, mx; static u32 n, late; if(timing<0) timing=!getenv("SWR_NO_VIDEO_TIMING");
+    if(timing){ u64 now=plat_ns(); if(last){ u64 dt=now-last; sum+=dt; if(dt>mx) mx=dt; if(dt>20000000ull) late++; n++;
+        if(n==120){ LOG("present timing: %.2f ms average, %.2f ms worst, %u of 120 over 20 ms\n",sum/120e6,mx/1e6,late); sum=mx=0; n=late=0; } } last=now; } }
   /* fps_limit: 1 = 60, otherwise N fps */
   /* in smooth recording the limiter has to count guest time, not real time.
      games that tick once per frame would otherwise run sped up in the video */
@@ -798,7 +826,7 @@ int swr_main(int argc, char** argv){
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);
   pm_init(&g_setq_lock); g_setq_init=1;
 #if defined(SWR_HAVE_FRONTEND)
-  { /* Play screen / first-run setup in the game window (dread_ui/fe.cpp; on Linux its own window); returns 0 = start the game, 1 = quit */
+  { /* Play screen / first-run setup in the game window (beyond_ui/fe.cpp; on Linux its own window); returns 0 = start the game, 1 = quit */
     extern int backend_frontend(int argc, char** argv, const char* exedir, const char* exename);
 #ifdef _WIN32
     if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); TerminateProcess(GetCurrentProcess(),0); } }
@@ -820,7 +848,7 @@ int swr_main(int argc, char** argv){
   pm_init(&g_hint_lock); pm_init(&g_flock);
   plat_install_crash_handler();
   g_t0=plat_ns(); g_t0_ticks=plat_ticks_raw();
-  g_present_pacing_candidate=!getenv("SWR_NO_PRESENT_PACING")&&(getenv("SWR_PRESENT_PACING")!=NULL||!strcmp(g_exename,"Metroid Dread"));
+  g_present_pacing_candidate=!getenv("SWR_NO_PRESENT_PACING")&&(getenv("SWR_PRESENT_PACING")!=NULL||!strcmp(g_exename,"Metroid Prime 4 Beyond"));
   LOG("%s (recompiled; SwitchRecomp runtime by MZ Labs)\n",g_exename); LOG("settings: startup fps_limit=%d, forced_vsync=%d\n",g_opt_fps,g_opt_vsync);
   if(load_code()) fatal("Could not load the game's recompiled code.");
   if(g_mod->abi!=1) fatal("The recompiled code is from another SwitchRecomp version.");
@@ -849,6 +877,10 @@ int swr_main(int argc, char** argv){
     frontend_frame();
     if(++tick%300==0) save_hints();
     { extern void snxvk_tick(int); snxvk_tick(tick); }   /* native Vulkan: saves its pipeline cache every 5 s */
+    /* SWR_STALL_DUMP=1: thread states when no frame came for 3 ticks (threads_stall_N.txt, first 6) */
+    { static int on=-1, lf, still, nd; if(on<0) on=getenv("SWR_STALL_DUMP")!=NULL;
+      if(on && nd<6){ if(g_frames!=lf){ lf=g_frames; still=0; } else if(++still==3 && g_frames>600){ extern __thread FILE* g_log_redirect; extern void kernel_dump_threads(void); char p[1200];
+          snprintf(p,sizeof p,"%sthreads_stall_%d.txt",g_exedir,nd++); FILE* f=fopen(p,"w"); if(f){ fprintf(f,"tick %d, frames %d\n",tick,g_frames); g_log_redirect=f; kernel_dump_threads(); g_log_redirect=NULL; fclose(f); } } } }
     /* dump thread states to threads.txt every 15s, useful when something hangs */
     if(tick%900==0){ extern __thread FILE* g_log_redirect; extern void kernel_dump_threads(void); char p[1200]; snprintf(p,sizeof p,"%sthreads.txt",g_exedir);
       FILE* f=fopen(p,"w"); if(f){ fprintf(f,"second %d, frames %d\n",tick/60,g_frames); g_log_redirect=f; kernel_dump_threads(); g_log_redirect=NULL; fclose(f); } }
@@ -882,20 +914,35 @@ int dladdr_name(void* pc, char* out, int n){ Dl_info i; if(dladdr(pc,&i) && i.dl
    header (in and out): revision, behaviour, memory_pools, voices, voice_resources, effects, mixes, sinks,
    performance, splitter, render_info, pad[4], total. */
 int audren_update(SvcObj* o, IpcCtx* c){
+  { /* SWR_VIDEO_TIMING=1: how often the game updates its audio renderer (200 a second on the console, 5 ms each) */
+    static int timing=-1; static u64 t0; static u32 n; if(timing<0) timing=!getenv("SWR_NO_VIDEO_TIMING");
+    if(timing){ u64 now=plat_ns(); if(!t0) t0=now; if(++n%1000==0){ LOG("audio timing: renderer updated %.1f times a second (renderer %p)\n",1000e9/(double)(now-t0),(void*)o); t0=now; } } }
   u64 ia,is,oa,os; buf_in(c,0,&ia,&is); buf_out(c,0,&oa,&os);
   if(!ia || !oa || is<0x40) return 0;
   u8* in=GP(ia); u8* out=GP(oa);
   u32 ih[16]; memcpy(ih,in,64);
   u64 required=64;
   for(int k=1;k<=10;k++)required+=(u64)ih[k];
-  if(required>is || ih[3]%0x170 || ih[4]%0x70 || ih[2]%0x20 || ih[7]%0x140){
-    WARN("audren: malformed update layout\n");return RC(153,4);
+  /* newer renderers (REV12+, e.g. Metroid Prime 4's REV15) send 0x188-byte voices: the two biquad filters hold float
+     coefficients (0x18 bytes each instead of 0xC), so every field after +0x24 is 0x18 later. The voice count is the
+     voice resources' (0x70 each); those voices are converted to the 0x170 layout the mixer reads */
+  u32 v2n= ih[4]/0x70, v2= ih[3] && ih[4] && ih[3]%0x170 && (u64)v2n*0x188==ih[3];
+  if(required>is || (ih[3]%0x170 && !v2) || ih[4]%0x70 || ih[2]%0x20 || ih[7]%0x140){
+    WARN("audren: malformed update layout (in %llu bytes; header %08x %x %x %x %x %x %x %x %x %x %x .. total %x)\n",(unsigned long long)is,
+         ih[0],ih[1],ih[2],ih[3],ih[4],ih[5],ih[6],ih[7],ih[8],ih[9],ih[10],ih[15]);return RC(153,4);
   }
   u32 rev=ih[0]; int revn=(int)((rev>>24)&0xFF)-'0'; if(revn<0) revn=0;
   u32 behav=ih[1], mp=ih[2], vo=ih[3], vr=ih[4], ef=ih[5];
-  u32 npools=mp/0x20, nvoices=vo/0x170, neff=ef/0xC0, nsinks=ih[7]/0x140;
+  u32 npools=mp/0x20, nvoices= v2? v2n : vo/0x170, neff=ef/0xC0, nsinks=ih[7]/0x140;
   u8* p=in+0x40+behav;
   u8* pools_in=p; p+=mp; p+=vr; u8* voices_in=p; p+=vo; u8* eff_in=p;
+  static u8* v1buf; static u32 v1cap;
+  if(v2){ if(nvoices*0x170>v1cap){ v1cap=nvoices*0x170; free(v1buf); v1buf=malloc(v1cap); }
+    for(u32 i=0;i<nvoices;i++){ const u8* s=voices_in+i*0x188; u8* d=v1buf+i*0x170;
+      memcpy(d,s,0x24); memcpy(d+0x3C,s+0x54,0x170-0x3C);
+      for(int k=0;k<2;k++){ const u8* fs=s+0x24+k*0x18; u8* fd=d+0x24+k*12; fd[0]=fs[0]; fd[1]=0;
+        for(int j=0;j<5;j++){ float f; memcpy(&f,fs+4+j*4,4); float q=f*16384.0f; i16 v= !(q==q)? 0 : q>32767.f? 32767 : q<-32768.f? -32768 : (i16)(q<0? q-0.5f : q+0.5f); memcpy(fd+2+j*2,&v,2); } } }
+    voices_in=v1buf; }
   int eff_v2 = revn>=9;
   u32 o_mp=npools*0x10, o_vo=nvoices*0x10, o_ef=neff*(eff_v2? 0x90 : 0x10), o_sk=nsinks*0x20, o_pf=0x10, o_bh=0xB0, o_ri= revn>=5? 0x10 : 0;
   u32 oh[16]; memset(oh,0,sizeof oh);
@@ -910,7 +957,23 @@ int audren_update(SvcObj* o, IpcCtx* c){
     u32 ns= st==4? 5 : st==2? 3 : st; memcpy(q+i*0x10,&ns,4); }
   q+=o_mp;
   extern void audio_render(SvcObj*,const u32*,const u8*,u64,const u8*,u32,u8*);
-  audio_render(o,ih,in,is,voices_in,nvoices,q);
+  /* The console's audio hardware mixes 5 ms every 5 ms on its own; RequestUpdate only changes what it mixes. Dread
+     updated every 5 ms, so one block per update was enough. Metroid Prime 4 updates once a frame (60 a second), and one
+     block per update gave 0.3 s of sound per second: choppy audio with gaps. Mix as many 5 ms blocks as real time has
+     passed since the last update (at least one, at most 8 after a stall; the remainder carries over, so the long-run
+     rate is exactly 48 kHz). The extra blocks see the same voices without the once-per-update actions (a new voice's
+     reset, buffer flushes) */
+  /* Several updates within 5 ms mix nothing (status only): Metroid Prime 4 calls RequestUpdate about 20000 times a
+     second for half a second during a transition, and one block per call made 50 s of sound for a 160 ms queue (11735
+     blocks dropped, the sound out of step afterwards). Audio advances with real time only, as on the console */
+  { u64 now=plat_ns(); u32 blocks=1; double owed=0;
+    if(o->u[6]){ memcpy(&owed,&o->u[7],8); owed+=(double)(now-o->u[6])/5000000.0; if(owed>8) owed=8; blocks=(u32)owed; owed-=blocks; memcpy(&o->u[7],&owed,8); }
+    o->u[6]=now;
+    { extern int g_audio_status_only; g_audio_status_only= blocks==0; audio_render(o,ih,in,is,voices_in,nvoices,q); g_audio_status_only=0; }
+    if(blocks>1){ static u8* again; static u32 again_cap; u32 vbytes=nvoices*0x170;
+      if(vbytes>again_cap){ free(again); again=malloc(vbytes); again_cap=vbytes; }
+      memcpy(again,voices_in,vbytes); for(u32 i=0;i<nvoices;i++){ again[i*0x170+8]=0; again[i*0x170+0x159]=0; }
+      for(u32 b=1;b<blocks;b++) audio_render(o,ih,in,is,again,nvoices,q); } }
   q+=o_vo;
   /* effects: Enabled(3) / Disabled(4) */
   for(u32 i=0;i<neff;i++){ u8 en=eff_in[i*0xC0+2]; q[i*(eff_v2?0x90:0x10)]= en? 3 : 4; }

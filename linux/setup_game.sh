@@ -1,8 +1,8 @@
 #!/bin/bash
 # Linux build, step 2: the first-run setup the Windows EXE does, from the command line. Checks your own extracted
-# Metroid Dread 2.1.0 (ExeFS + RomFS), installs the RomFS into games/Metroid Dread_data (hard links when on the same
-# disk), translates the ExeFS to C, applies the verified patches, compiles "Metroid Dread_code.so" with gcc and puts the
-# runtime next to it as "games/Metroid Dread". Stopped or failed runs continue where they were.
+# Metroid Prime 4 Beyond 2.1.0 (ExeFS + RomFS), installs the RomFS into games/Metroid Prime 4 Beyond_data (hard links when on the same
+# disk), translates the ExeFS to C, applies the verified patches, compiles "Metroid Prime 4 Beyond_code.so" with gcc and puts the
+# runtime next to it as "games/Metroid Prime 4 Beyond". Stopped or failed runs continue where they were.
 # Usage: setup_game.sh GAME_FOLDER [UPDATE_FOLDER]
 #   GAME_FOLDER   the extracted game (exefs/ + romfs/), with the 2.1.0 update merged in, or the base game
 #   UPDATE_FOLDER the extracted 2.1.0 update, when it is a separate dump
@@ -16,7 +16,7 @@ mkdir -p "$GAMES"
 args=(--out "$GAMES" --name "$NAME" --base "$(readlink -f "$1")")
 [ -n "$2" ] && args+=(--update "$(readlink -f "$2")")
 # '@@P pct stage|detail' lines become one updating progress line, '@@E' the error, the rest is the log
-"$PY" -u "$W/dread/dread_setup.py" "${args[@]}" 2>&1 | tee "$GAMES/setup.log" | while IFS= read -r ln; do
+"$PY" -u "$W/beyond/beyond_setup.py" "${args[@]}" 2>&1 | tee "$GAMES/setup.log" | while IFS= read -r ln; do
   case "$ln" in
     "@@P "*) p=${ln#@@P }; printf '\r\033[K[%5s%%] %s' "${p%% *}" "$(echo "${p#* }" | tr '|' ' ')";;
     "@@E "*) printf '\n\nerror: %s\n' "${ln#@@E }" >&2;;

@@ -28,7 +28,9 @@ typedef struct {
   int writes_depth, uses_position_in, uses_clip_mask, writes_layer, writes_point_size, uses_front_face;
   u32 frag_rt_mask;
   int uses_global, uses_local, local_size;
-  u32 gbuf_cbuf_off[16]; int ngbuf;  /* global buffers found (their cbuf0 offset) */
+  u32 gbuf_cbuf_off[16]; int ngbuf;  /* global buffers found: where their 64-bit address is (constant buffer offset) */
+  u8 gbuf_cbuf_idx[16];          /* ... in which constant buffer */
+  u8 gbuf_sized[16];             /* 1: NVN's SSBO table, {address, size}; 0: a bare pointer (the game's), size unknown */
   int unsupported;               /* count of instructions we couldn't translate */
   char first_unsupported[64];
   u32 cs_local[3]; int shared_size;

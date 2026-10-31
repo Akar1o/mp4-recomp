@@ -1,15 +1,15 @@
-"""Metroid Dread first-run setup, started by the game EXE (dread_ui/fe_sys.cpp setup_start).
+"""Metroid Prime 4 Beyond first-run setup, started by the game EXE (beyond_ui/fe_sys.cpp setup_start).
 
-Checks the player's own game files (v2.1.0 only), assembles the RomFS (base + update layered, then every file checked
-against the 2.1.0 manifest), translates the ExeFS to C with SwitchRecomp, applies the verified Dread patches, compiles
-with the bundled GCC and links Metroid Dread_code.dll next to the EXE.
+Checks the player's own game files (the supported build only), assembles the RomFS (base + update layered, then every file
+checked against the manifest), translates the ExeFS to C with SwitchRecomp, applies the verified patches (if any), compiles
+with the bundled GCC and links Metroid Prime 4 Beyond_code.dll next to the EXE.
 
 Output protocol on stdout (one line each): '@@P <percent> <stage>|<detail>' progress, '@@E <message>' failure,
 '@@D' done; everything else is log. Every stage leaves a marker so a stopped or failed setup continues where it was.
 
-Usage: dread_setup.py --out DIR --name "Metroid Dread" --base DIR [--update DIR]
+Usage: beyond_setup.py --out DIR --name "Metroid Prime 4 Beyond" --base DIR [--update DIR]
 
-On Linux (linux/setup_game.sh) the same steps give Metroid Dread_code.so, compiled with the system's gcc and with
+On Linux (linux/setup_game.sh) the same steps give Metroid Prime 4 Beyond_code.so, compiled with the system's gcc and with
 linux/lx_compat.h force-included, so the patched (Windows) sources compile unchanged.
 """
 import argparse, hashlib, json, os, shutil, struct, sys, threading, time
@@ -17,15 +17,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if not os.path.isfile(os.path.join(HERE, 'switchrecomp.py')):
-    HERE = os.path.dirname(HERE)   # run from the repository's dread/, not from the release's recompiler folder
+    HERE = os.path.dirname(HERE)   # run from the repository's beyond/, not from the release's recompiler folder
 sys.path.insert(0, HERE)
 WIN = sys.platform.startswith('win')
 LX_COMPAT = os.path.join(HERE, 'linux', 'lx_compat.h')
-TITLE_ID = 0x010093801237C000
-BUILD_ID = '646761F643AFEBB379EDD5E6A5151AF2CEF93DC1'
-VERSION = '2.1.0'
-PATCHES = os.path.join(HERE, 'dread', 'dread_v210_patches.json')
-MANIFEST = os.path.join(HERE, 'dread', 'romfs_v210.manifest')
+TITLE_ID = 0x010019A01E2F2000
+BUILD_ID = '8275FBE1EC5191C279F3A943AD8524F4BAB087A3'
+VERSION = 'RS15 (build 8275FBE1)'
+PATCHES = os.path.join(HERE, 'beyond', 'beyond_patches.json')
+MANIFEST = os.path.join(HERE, 'beyond', 'romfs_beyond.manifest')
+FOV_HOOKS = os.path.join(HERE, 'beyond', 'fov_hooks.txt')
 SETUP_FORMAT = 1
 
 
@@ -64,7 +65,8 @@ def _is_exefs(c):
 
 
 def _is_romfs(c):
-    return os.path.isdir(os.path.join(c, 'system')) or os.path.isdir(os.path.join(c, 'packs')) or os.path.isfile(os.path.join(c, 'config.ini'))
+    # Prime 4's RomFS: Worlds/, UI/, Preload/ and the Kernel.pak / MaterialArchive.arc at its root
+    return os.path.isdir(os.path.join(c, 'Worlds')) and (os.path.isfile(os.path.join(c, 'Kernel.pak')) or os.path.isdir(os.path.join(c, 'Preload')))
 
 
 def _below(folder, test, depth=3):
@@ -117,19 +119,19 @@ def pick_exefs(base, update):
         bid = nso_build_id(os.path.join(ex, 'main'))
         log('ExeFS in the %s: %s (program %s, build %s)' % (what, ex, ('%016X' % pid) if pid else '?', bid or 'not an NSO'))
         if pid is not None and pid != TITLE_ID:
-            raise Fail('The %s is not Metroid Dread: its program ID is %016X (Metroid Dread is 010093801237C000). '
-                       'This build compiles Metroid Dread only.' % (what, pid))
+            raise Fail('The %s is not Metroid Prime 4 Beyond: its program ID is %016X (Metroid Prime 4 Beyond is 010019A01E2F2000). '
+                       'This build compiles Metroid Prime 4 Beyond only.' % (what, pid))
         if bid == BUILD_ID:
             return ex
         seen.append((what, bid))
     if not seen:
         raise Fail('No ExeFS found (the files main and main.npdm, looked for up to 3 folders deep). A RomFS dump alone is not '
                    'enough: the game code is in the ExeFS, which is extracted separately. Extract both the ExeFS and the RomFS of '
-                   'your copy with the 2.1.0 update applied, then choose the folder that holds them.')
+                   'your copy with the latest update applied, then choose the folder that holds them.')
     what, bid = seen[0]
-    raise Fail('The %s has Metroid Dread, but not version %s (its main has build ID %s). '
-               'Most likely this is the base game: also choose the extracted 2.1.0 update as "Update folder", or extract the game '
-               'with the update applied, which gives the 2.1.0 ExeFS.'
+    raise Fail('The %s has Metroid Prime 4 Beyond, but not version %s (its main has build ID %s). '
+               'Most likely this is the base game or another update: choose the extracted update as "Update folder", or extract the game '
+               'with the update applied.'
                % (what, VERSION, (bid or 'unknown')[:16] + '...'))
 
 
@@ -211,7 +213,7 @@ def assemble_romfs(base_romfs, upd_romfs, dst, pct0, pct1):
         if upd_romfs and not base_romfs:
             hint = ' An update RomFS on its own only has the changed files: also choose the base game folder.'
         elif base_romfs and not upd_romfs:
-            hint = (' Files only the 2.1.0 update adds are missing: choose the extracted update as "Update folder", or extract a RomFS with the '
+            hint = (' Files only the update adds are missing: choose the extracted update as "Update folder", or extract a RomFS with the '
                     'update applied (an emulator\'s "Extract RomFS" with the update installed does this).')
         raise Fail('The RomFS is incomplete: %d of %d files of version %s are missing (for example %s).%s'
                    % (len(missing), len(rows), VERSION, ', '.join(missing[:3]), hint))
@@ -267,13 +269,16 @@ def assemble_romfs(base_romfs, upd_romfs, dst, pct0, pct1):
 
 # ------------------------------------------------------------------ code
 def apply_patches(build):
-    """dread_v210_patches.json, format 2 (dread/make_patches.py): per generated file the SHA-256 of the codegen output it
+    """beyond_patches.json, format 2 (beyond/make_patches.py): per generated file the SHA-256 of the codegen output it
     expects and of the result, and hunks [first_line, end_line, lines] replacing those lines. No generated code is stored:
-    the codegen output is deterministic for the verified 2.1.0 ExeFS, and the hashes check it before and after"""
+    the codegen output is deterministic for the verified ExeFS, and the hashes check it before and after"""
+    if not os.path.isfile(PATCHES):
+        log('No game-code patches for this build yet: the code is compiled as translated')
+        return
     with open(PATCHES, 'r', encoding='utf-8') as f:
         patches = json.load(f)
     if patches.get('format') != 2:
-        raise Fail('dread_v210_patches.json is not in the expected format (2).')
+        raise Fail('beyond_patches.json is not in the expected format (2).')
     n = 0
     for name, spec in patches['files'].items():
         path = os.path.join(build, name)
@@ -297,19 +302,19 @@ def apply_patches(build):
             text = text.replace('\n', '\r\n')
         with open(path, 'wb') as f:
             f.write(text.encode('latin-1'))
-    log('Applied %d verified Metroid Dread %s patches (memcpy, texture rows, zlib, 60 FPS scenes, vector growth)' % (n, VERSION))
+    log('Applied %d verified Metroid Prime 4 Beyond %s patches' % (n, VERSION))
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--out', required=True); ap.add_argument('--name', default='Metroid Dread')
+    ap.add_argument('--out', required=True); ap.add_argument('--name', default='Metroid Prime 4 Beyond')
     ap.add_argument('--base', required=True); ap.add_argument('--update', default='')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
     out, name = os.path.abspath(a.out), a.name
     data = os.path.join(out, name + '_data'); build = os.path.join(out, name + '_build')
     dll = os.path.join(out, name + ('_code.dll' if WIN else '_code.so'))
-    log('Metroid Dread setup (format %d) - SwitchRecomp by MZ Labs; use only your own copy of the game.' % SETUP_FORMAT)
+    log('Metroid Prime 4 Beyond setup (format %d) - SwitchRecomp by MZ Labs; use only your own copy of the game.' % SETUP_FORMAT)
     log('Game folder: %s' % a.base)
     if a.update:
         log('Update folder: %s' % a.update)
@@ -331,7 +336,7 @@ def main():
         need = 3 * 2**30 if same_volume(base_romfs or upd_romfs, out) else 9 * 2**30
         if free < need:
             raise Fail('Not enough free space on the drive of %s: %.1f GB free, about %.0f GB needed.' % (out, free / 2**30, need / 2**30))
-        P(2, 'Checking game files', 'Metroid Dread %s' % VERSION)
+        P(2, 'Checking game files', 'Metroid Prime 4 Beyond %s' % VERSION)
 
         assemble_romfs(base_romfs, upd_romfs, os.path.join(data, 'romfs'), 2, 22)
 
@@ -344,7 +349,7 @@ def main():
 
         import switchrecomp, nxloader, codegen   # the SwitchRecomp translator, bundled next to this script
         gen_marker = os.path.join(build, '.generated')
-        gen_key = hashlib.sha1(open(os.path.join(ex_dst, 'main'), 'rb').read()[:0x100] + open(PATCHES, 'rb').read()
+        gen_key = hashlib.sha1(open(os.path.join(ex_dst, 'main'), 'rb').read()[:0x100] + (open(PATCHES, 'rb').read() if os.path.isfile(PATCHES) else b'')
                                + open(os.path.join(HERE, 'codegen.py'), 'rb').read() + open(os.path.join(HERE, 'metroid_perf.py'), 'rb').read()).hexdigest()
         if os.path.isfile(gen_marker) and open(gen_marker).read().strip() == gen_key:
             log('Generated code already in place: kept')
@@ -376,11 +381,11 @@ def main():
                     P(state['p'], 'Translating the game code', msg.strip())
                 elif msg.startswith('Functions'):
                     P(25.5, 'Translating the game code', msg.strip())
-            P(23.5, 'Translating the game code', 'analysing 7 million instructions')
+            P(23.5, 'Translating the game code', 'analysing the game code')
             prog.analyze(say)
             os.makedirs(build, exist_ok=True)
             files = switchrecomp.gen_module(prog, mods, npdm, build, name, 30000, say)
-            P(30, 'Applying Metroid Dread fixes', '')
+            P(30, 'Applying Metroid Prime 4 Beyond fixes', '')
             apply_patches(build)
             kept = 0
             for f, (h, mt) in before.items():
@@ -415,8 +420,11 @@ def main():
         switchrecomp.link_module(objs, cc, dll, WIN, log)
         if not os.path.isfile(dll) or os.path.getsize(dll) < 50 * 2**20:
             raise Fail('Linking produced no usable game code.')
+        if os.path.isfile(FOV_HOOKS):   # the [Gameplay] fov setting's hook list (runtime/cheats.c)
+            shutil.copyfile(FOV_HOOKS, os.path.join(data, 'fov_hooks.txt'))
+        os.makedirs(os.path.join(data, 'cheats'), exist_ok=True)   # Atmosphere-format cheat files go here
         with open(os.path.join(data, 'setup.ok'), 'w') as f:
-            json.dump({'game': 'Metroid Dread', 'title_id': '%016X' % TITLE_ID, 'version': VERSION, 'build_id': BUILD_ID,
+            json.dump({'game': 'Metroid Prime 4 Beyond', 'title_id': '%016X' % TITLE_ID, 'version': VERSION, 'build_id': BUILD_ID,
                        'format': SETUP_FORMAT, 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
                        'dll_sha256': hashlib.sha256(open(dll, 'rb').read()).hexdigest()}, f, indent=1)
         P(100, 'Done', '')

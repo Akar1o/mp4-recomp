@@ -39,6 +39,8 @@ extern void (*g_backend_status)(const char*);
 extern int g_snxvk_on;
 extern int g_opt_ff;
 extern int g_frames;
+int cheats_count(void); int cheats_info(int i, char* name, int cap, int* on, int* master); void cheats_set(int i, int on);
+const char* cheats_path(void); void cheats_reload(void); int fov_available(void);
 void logf_(int lvl, const char* f, ...);
 }
 using namespace ui;
@@ -70,8 +72,8 @@ std::map<std::string, std::string> g_vals;        // the menu's copy
 struct Revert { bool active = false; double t0 = 0; std::vector<std::pair<std::string, std::string>> old; } g_rev;
 bool g_quit_confirm;
 
-const char* const TABS[] = {"DISPLAY", "GRAPHICS", "GAMEPLAY", "AUDIO", "CONTROLS", "HELP"};
-const int NTABS = 6;
+const char* const TABS[] = {"DISPLAY", "GRAPHICS", "GAMEPLAY", "CHEATS", "AUDIO", "CONTROLS", "HELP"};
+const int NTABS = 7;
 
 std::string val(const char* k) { auto it = g_vals.find(k); if (it != g_vals.end()) return it->second; const Opt* o = find_option(k); return o ? o->def : ""; }
 void change(const char* k, const std::string& v) {
@@ -115,15 +117,25 @@ void tab_content(int t) {
     switch (t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
             opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
-    case 1: section("QUALITY"); opt_row("antialiasing"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
-    case 2: section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps"); section("SCENES"); opt_row("cutscenes_60fps"); opt_row("loading_60fps");
-#ifndef SWR_NO_SKIPCUT
-        opt_row("skip_cutscenes");
-#endif
-       
+    case 1: section("UPSCALING"); opt_row("resolution"); opt_row("upscaler"); if (val("upscaler") == "fsr") opt_row("fsr_sharpness");
+            section("QUALITY"); opt_row("antialiasing"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
+    case 2: section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps");
+            section("CAMERA"); opt_row("fov"); if (!fov_available()) help_text("No FOV hook for this game build yet: the slider has no effect until one is added to beyond/fov_hooks.txt.");
             section("LOADING"); opt_row("fast_loading"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
-    case 3: section("OUTPUT"); opt_row("volume"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
-    case 4: section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_sensitivity");
+    case 3: {
+        section("CHEATS"); opt_row("cheats");
+        int n = cheats_count();
+        if (!n) help_text(fmt("No cheats for this game build. Put an Atmosphere cheat file at %s and press Reload.", cheats_path()).c_str());
+        for (int i = 0; i < n; i++) {
+            char name[64]; int on = 0, master = 0; if (!cheats_info(i, name, sizeof name, &on, &master)) break;
+            if (master) { row_text(name, "always on (master code)"); continue; }
+            bool b = on != 0; if (row_bool(fmt("##cheat%d", i).c_str(), name, &b)) cheats_set(i, b);
+        }
+        if (row_button("##cheatreload", "Read the cheat file again", "RELOAD")) cheats_reload();
+        help_text("Cheats that change game data work; cheats that patch game code (ARM instructions) do nothing, the code is recompiled.");
+        break; }
+    case 4: section("OUTPUT"); opt_row("volume"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
+    case 5: section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_sensitivity");
             section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
             help_text("Button mapping and menu buttons are on the Play screen's Controls page."); break;
     default: {
@@ -132,7 +144,7 @@ void tab_content(int t) {
                                {"Fast forward (if on)", "Tab, or L3 + R3"}, {"Quit", "Esc"}, {"Move / aim", "W A S D / I J K L"}, {"A B X Y", "X  Z  C  V"},
                                {"L R ZL ZR", "Q  E  1  3"}, {"+ / -", "Enter / Backspace"}};
         for (auto& r : kb) row_text(r[0], r[1]);
-        section("ABOUT"); help_text("Metroid Dread recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; 60 FPS cutscenes by theboy181; Dear ImGui; SDL2. Full credits on the Play screen.");
+        section("ABOUT"); help_text("Metroid Prime 4 Beyond recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; 60 FPS cutscenes by theboy181; Dear ImGui; SDL2. Full credits on the Play screen.");
     } }
 }
 

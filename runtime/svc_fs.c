@@ -430,6 +430,8 @@ static int fsp_disp(SvcObj* o, IpcCtx* c){
       out_obj(c,hostfs_new(p)); return 0; }
     case 22: case 23: case 25: case 26: case 27: case 28: case 32: case 33: case 34: case 35: case 36: case 37: return 0;
     case 60: case 61: case 62: out_obj(c,svcobj_new("ISaveDataInfoReader",savereader,0)); return 0;
+    /* 205 OpenDataStorageWithProgramIndex (newer SDKs, Metroid Prime 4): program index 0 is this program's own RomFS */
+    case 205: if(in8(c,0)!=0){ LOG("fs: RomFS of program index %u requested: not available\n",in8(c,0)); return RC(2,1001); } /* fall through */
     case 200: { if(!rtotal) { WARN("fs: the game requests the RomFS but there is none (put the romfs folder in %s)\n",g_datadir); }
       out_obj(c,svcobj_new("IStorage(romfs)",romstorage,0)); return 0; }
     case 202: { u64 id=in64(c,8); emptyrom_init(); LOG("fs: system data %016llx (not available on PC: provided empty)\n",(unsigned long long)id);

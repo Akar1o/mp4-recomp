@@ -24,7 +24,7 @@ static u64 v9_cache_bytes,v9_cache_clock,v9_cache_hits,v9_decoder_calls;
 #ifndef V9_CACHE_LIMIT
 #define V9_CACHE_LIMIT (256ull<<20)
 #endif
-static int v9_cache_enabled(void){extern char g_exename[];return !getenv("SWR_NO_VP9_FRAME_CACHE")&&(getenv("SWR_VP9_FRAME_CACHE")||!strcmp(g_exename,"Metroid Dread"));}
+static int v9_cache_enabled(void){extern char g_exename[];return !getenv("SWR_NO_VP9_FRAME_CACHE")&&(getenv("SWR_VP9_FRAME_CACHE")||!strcmp(g_exename,"Metroid Prime 4 Beyond"));}
 static void v9_cache_drop(V9Vid*V,V9F*f){if(f->pixels){V->cache_count--;v9_cache_bytes-=f->bytes;free(f->pixels);f->pixels=NULL;f->bytes=0;f->cached_used=0;}}
 static int v9_cache_space(u32 bytes){
   while(v9_cache_bytes+bytes>V9_CACHE_LIMIT){V9F*old=NULL;V9Vid*owner=NULL;

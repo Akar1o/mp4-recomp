@@ -1,6 +1,6 @@
-"""Build the Metroid Dread release and the source-only folder.
+"""Build the Metroid Prime 4 Beyond release and the source-only folder.
 
-  make_release.py release OUT_DIR --version X.Y.Z [--exe PATH]   -> OUT_DIR\\Metroid Dread\\ (the game EXE + recompiler + licences) and a .zip
+  make_release.py release OUT_DIR --version X.Y.Z [--exe PATH]   -> OUT_DIR\\Metroid Prime 4 Beyond\\ (the game EXE + recompiler + licences) and a .zip
   make_release.py source  OUT_DIR                -> a clean source tree for GitHub (no game files, no generated code, no binaries
                                                     we don't have the right to publish, no DLSS)
 
@@ -72,13 +72,13 @@ https://www.mingw-w64.org, https://github.com/brechtsanders/winlibs_mingw (the e
 README = """METROID DREAD - recompiled for PC
 =================================
 
-This is not the game. It turns YOUR OWN copy of Metroid Dread (version 2.1.0) into a native Windows game:
+This is not the game. It turns YOUR OWN copy of Metroid Prime 4 Beyond (version 2.1.0) into a native Windows game:
 setup compiles it on your PC. No Nintendo files, keys or firmware are included.
 
-1. Dump Metroid Dread and its 2.1.0 update from your own Switch and extract them, with the update applied, into a
+1. Dump Metroid Prime 4 Beyond and its 2.1.0 update from your own Switch and extract them, with the update applied, into a
    folder with "exefs" and "romfs" inside (an emulator's "Extract RomFS" / "Extract ExeFS" with the update installed
    gives this too). This program does not dump or decrypt anything itself.
-2. Start "Metroid Dread.exe". The first time it asks for that folder (and, if you extracted the update separately,
+2. Start "Metroid Prime 4 Beyond.exe". The first time it asks for that folder (and, if you extracted the update separately,
    the update folder), checks every file against the 2.1.0 file list and compiles the game with the bundled GCC.
    That takes a few minutes and about 7 GB of space next to the EXE (less when your game files are on the same drive).
 3. Then it opens to the Play screen. Settings, controller set-up, mods and save backups are all there.
@@ -91,7 +91,7 @@ Made by yozander2009-stack (project lead) with Claude by Anthropic (AI pair prog
 Credits: SwitchRecomp by MZ Labs (recompiler and runtime); ScarletNX (native Vulkan renderer); theboy181 (60 FPS cutscenes,
 21:9); Krydar, Nova77, xSeRosiSx (button-icon mods, downloaded on request; art: Xelu's FREE Controller Prompts); program icon: Metroid icon created by Smashicons - Flaticon (https://www.flaticon.com/free-icons/metroid); Dear ImGui; SDL2; zlib; libvpx; OpenH264; GCC / MinGW-w64; Python. Licences are in the licenses folder; the EXE is
 GPL-3.0 (it contains the ScarletNX renderer) and its source is published with this release.
-Metroid Dread is (c) Nintendo. This project is not affiliated with or endorsed by Nintendo.
+Metroid Prime 4 Beyond is (c) Nintendo. This project is not affiliated with or endorsed by Nintendo.
 """
 
 
@@ -105,9 +105,9 @@ def redist(name):
 
 
 def update_files(out, version):
-    """update-<version>.zip and update.txt for the release in OUT/Metroid Dread (also: make_release.py update)"""
-    dst = os.path.join(out, 'Metroid Dread')
-    # in-place updates (runtime/dread_ui/fe_update.cpp): every file the release owns except the bundled compiler and
+    """update-<version>.zip and update.txt for the release in OUT/Metroid Prime 4 Beyond (also: make_release.py update)"""
+    dst = os.path.join(out, 'Metroid Prime 4 Beyond')
+    # in-place updates (runtime/beyond_ui/fe_update.cpp): every file the release owns except the bundled compiler and
     # Python, in update-<version>.zip, and update.txt listing each with SHA-256 and size. The installed copy keeps
     # update.txt as the record of what is installed. Publish update.txt and the update zip as release assets too
     own = []
@@ -127,7 +127,7 @@ def update_files(out, version):
     def sha(f):
         with open(f, 'rb') as h:
             return hashlib.sha256(h.read()).hexdigest()
-    lines = ['# Metroid Dread PC update manifest (make_release.py)', 'version %s' % version, 'tag v%s' % version,
+    lines = ['# Metroid Prime 4 Beyond PC update manifest (make_release.py)', 'version %s' % version, 'tag v%s' % version,
              'package %s %s %d' % (pkg, sha(pz), os.path.getsize(pz))]
     for r in own:
         f = os.path.join(dst, r.replace('/', os.sep))
@@ -139,19 +139,19 @@ def update_files(out, version):
 
 
 def release(out, exe, version):
-    dst = os.path.join(out, 'Metroid Dread')
+    dst = os.path.join(out, 'Metroid Prime 4 Beyond')
     if os.path.exists(dst):
         raise SystemExit('%s exists: choose a new folder' % dst)
     os.makedirs(dst)
-    cp(exe, os.path.join(dst, 'Metroid Dread.exe'))
+    cp(exe, os.path.join(dst, 'Metroid Prime 4 Beyond.exe'))
     for f in ('zlib1.dll', 'SDL2.dll'):
         cp(redist(f), os.path.join(dst, f))
     rc = os.path.join(dst, 'recompiler')
     for f in RECOMPILER_PY:
         cp(os.path.join(ROOT, f), os.path.join(rc, f))
-    cp(os.path.join(ROOT, 'dread', 'dread_setup.py'), os.path.join(rc, 'dread_setup.py'))
-    for f in ('dread_v210_patches.json', 'romfs_v210.manifest'):
-        cp(os.path.join(ROOT, 'dread', f), os.path.join(rc, 'dread', f))
+    cp(os.path.join(ROOT, 'beyond', 'beyond_setup.py'), os.path.join(rc, 'beyond_setup.py'))
+    for f in ('beyond_patches.json', 'romfs_beyond.manifest'):
+        cp(os.path.join(ROOT, 'beyond', f), os.path.join(rc, 'beyond', f))
     for f in ('cpu.h', 'cpu_helpers.c'):
         cp(os.path.join(ROOT, 'runtime', f), os.path.join(rc, 'runtime', f))
     cptree(os.path.join(ROOT, 'python'), os.path.join(rc, 'python'), ignore=shutil.ignore_patterns('__pycache__'))
@@ -162,12 +162,12 @@ def release(out, exe, version):
     open(os.path.join(lic, 'zlib-and-SDL2.txt'), 'w').write(ZLIB_TXT)
     open(os.path.join(lic, 'GCC-binutils-MinGW.txt'), 'w').write(GCC_TXT)
     open(os.path.join(lic, 'theboy181-patches.txt'), 'w').write(
-        'The 60 FPS cutscene and 21:9 patches are ports of theboy181\'s Metroid Dread v2.1.0 patches\n'
+        'The 60 FPS cutscene and 21:9 patches are ports of theboy181\'s Metroid Prime 4 Beyond v2.1.0 patches\n'
         '(https://github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081.\n')
     open(os.path.join(dst, 'README.txt'), 'w', newline='\r\n').write(README)
     update_files(out, version)
     # one zip to download
-    z = os.path.join(out, 'MetroidDread-PC-v%s.zip' % version)
+    z = os.path.join(out, 'MetroidBeyond-PC-v%s.zip' % version)
     with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for dp, dn, fn in os.walk(dst):
             for n in fn:
@@ -248,8 +248,8 @@ def source(out):
     for rel in ('runtime/vp9/win/libvpx.a', 'runtime/oh264/win/libdecoder.a', 'runtime/oh264/win/libcommon.a'):
         if os.path.isfile(os.path.join(ROOT, rel)):
             cp(os.path.join(ROOT, rel), os.path.join(out, rel))
-    for f in ('dread_setup.py', 'make_release.py', 'make_patches.py', 'make_manifest.py', 'dread_v210_patches.json', 'romfs_v210.manifest', 'DESIGN.md'):
-        cp(os.path.join(ROOT, 'dread', f), os.path.join(out, 'dread', f))
+    for f in ('beyond_setup.py', 'make_release.py', 'make_patches.py', 'make_manifest.py', 'beyond_patches.json', 'romfs_beyond.manifest', 'DESIGN.md'):
+        cp(os.path.join(ROOT, 'beyond', f), os.path.join(out, 'beyond', f))
     im = os.path.join(ROOT, 'third_party', 'imgui-1.92.5')
     for f in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp', 'imgui.h', 'imconfig.h', 'imgui_internal.h',
               'imstb_rectpack.h', 'imstb_textedit.h', 'imstb_truetype.h', 'LICENSE.txt'):
@@ -264,22 +264,22 @@ def source(out):
         p = os.path.join(ROOT, 'linux', f)
         if os.path.isfile(p) and (f.endswith('.sh') or f.endswith('.h') or f.endswith('.txt')):
             cp(p, os.path.join(out, 'linux', f))
-    for f in ('run.sh', 'README-SteamDeck.txt', 'Metroid Dread.ini'):   # the Steam Deck package's own files (linux/package.sh)
+    for f in ('run.sh', 'README-SteamDeck.txt', 'Metroid Prime 4 Beyond.ini'):   # the Steam Deck package's own files (linux/package.sh)
         cp(os.path.join(ROOT, 'linux', 'dist', f), os.path.join(out, 'linux', 'dist', f))
-    for f in ('AppRun', 'metroid-dread.desktop'):   # the AppImage's own files (linux/make_appimage.sh)
+    for f in ('AppRun', 'metroid-beyond.desktop'):   # the AppImage's own files (linux/make_appimage.sh)
         cp(os.path.join(ROOT, 'linux', 'appimage', f), os.path.join(out, 'linux', 'appimage', f))
     cp(os.path.join(ROOT, 'runtime', 'snxvk', 'LICENSE'), os.path.join(out, 'LICENSE-GPL-3.0.txt'))
     open(os.path.join(out, '.gitignore'), 'w').write('\n'.join(['gcc/', 'python/', 'bin/', 'games/', '*_build/', '*_data/', '*_code.dll', '*.o', '*.a',
         '!runtime/vp9/win/libvpx.a', '!runtime/oh264/win/*.a', 'runtime/imgui/', 'redist/', 'cleanbuild_test/', 'runtime/snxvk/obj*/', '__pycache__/', 'release/', '*.log', 'shader_cache/', 'vulkan_native/', '',
-        '# Linux build output (linux/*.sh)', '*.so', 'linux/test/', 'linux/dist/MetroidDread-Linux/', 'linux/dist/*.tar.gz', 'linux/dist/*.AppImage', 'linux/appimage/cache/', 'linux/appimage/AppDir/', '',
+        '# Linux build output (linux/*.sh)', '*.so', 'linux/test/', 'linux/dist/MetroidBeyond-Linux/', 'linux/dist/*.tar.gz', 'linux/dist/*.AppImage', 'linux/appimage/cache/', 'linux/appimage/AppDir/', '',
         '# never commit binaries, archives or game files', '*.exe', '*.dll', '*.pdb', '*.zip', '*.7z', '*.rar', '*.nsp', '*.xci',
         '*.nca', '*.nso', '*.keys', 'exefs/', 'romfs/', 'ExeFS/', 'RomFS/', 'mods/', '']))
     # line endings exactly as written (some runtime files are CRLF by rule, the Linux scripts must stay LF)
     open(os.path.join(out, '.gitattributes'), 'w', newline='\n').write('* -text\n')
     open(os.path.join(out, 'README.md'), 'w', encoding='utf-8').write(SOURCE_README)
-    cp(os.path.join(ROOT, 'dread', 'DLSS.md'), os.path.join(out, 'DLSS.md'))
+    cp(os.path.join(ROOT, 'beyond', 'DLSS.md'), os.path.join(out, 'DLSS.md'))
     # files that only belong in the repository (CONTRIBUTING.md, build.bat, .github issue forms)
-    repo = os.path.join(ROOT, 'dread', 'repo')
+    repo = os.path.join(ROOT, 'beyond', 'repo')
     for dp, dn, fn in os.walk(repo):
         for n in fn:
             p = os.path.join(dp, n); cp(p, os.path.join(out, os.path.relpath(p, repo)))
@@ -287,7 +287,7 @@ def source(out):
     print('source: %s (%d files)' % (out, n))
 
 
-SOURCE_README = """# Metroid Dread — recompiled for PC
+SOURCE_README = """# Metroid Prime 4 Beyond — recompiled for PC
 
 > **Work in progress.** This project was shared on Reddit and elsewhere before it was ready: the planned first proper
 > release is 1.0.0, and current builds (0.x) are early previews. Expect crashes, setup problems and rough edges on
@@ -295,16 +295,16 @@ SOURCE_README = """# Metroid Dread — recompiled for PC
 > game folder, plus your CPU, GPU, RAM and Windows version. I'll do the best I can to resolve the errors and make this
 > a good experience.
 
-One Windows EXE that sets up, configures and runs a native PC build of **your own** copy of Metroid Dread 2.1.0.
-It is the SwitchRecomp runtime (by MZ Labs) with a Metroid Dread front end built in: first-run setup that compiles
+One Windows EXE that sets up, configures and runs a native PC build of **your own** copy of Metroid Prime 4 Beyond 2.1.0.
+It is the SwitchRecomp runtime (by MZ Labs) with a Metroid Prime 4 Beyond front end built in: first-run setup that compiles
 the game with a bundled GCC, a Play / settings screen, and an in-game menu (F1 or the Home / Guide button).
 
 ![The Play screen](docs/images/play-screen.png)
 
 **No Nintendo files are in this repository**: no game code, no RomFS, no keys, no generated C.
 
-- `dread/dread_v210_patches.json` holds small anchored edits that setup applies to the C it generates from the player's ExeFS.
-- `dread/romfs_v210.manifest` lists RomFS file names, sizes and SHA-1 hashes, so setup can verify the player's files.
+- `beyond/beyond_patches.json` holds small anchored edits that setup applies to the C it generates from the player's ExeFS.
+- `beyond/romfs_beyond.manifest` lists RomFS file names, sizes and SHA-1 hashes, so setup can verify the player's files.
 
 ## Layout
 
@@ -312,16 +312,16 @@ the game with a bundled GCC, a Play / settings screen, and an in-game menu (F1 o
 |---|---|
 | `switchrecomp.py`, `codegen.py`, `a64.py`, `nxloader.py`, `metroid_perf.py` | SwitchRecomp: ARM64 → C translator (Apache-2.0) |
 | `runtime/` | the runtime: kernel, services, GPU → OpenGL, audio, video, input |
-| `runtime/dread_ui/` | front end: `fe.cpp` (setup, Play, settings), `ov.cpp` (in-game menu), `ui.cpp` (theme, widgets, settings table) |
+| `runtime/beyond_ui/` | front end: `fe.cpp` (setup, Play, settings), `ov.cpp` (in-game menu), `ui.cpp` (theme, widgets, settings table) |
 | `runtime/snxvk/` | ScarletNX's native Vulkan renderer (GPL-3.0, main b5f4f14) in `src_new/`, vendored, symbols prefixed `snxv_`; our DLSS code in `src_new/nx/gpu/vk/dlss.c` |
-| `dread/` | setup driver run by the EXE, patch set, RomFS manifest, release script, design notes |
+| `beyond/` | setup driver run by the EXE, patch set, RomFS manifest, release script, design notes |
 | `third_party/imgui-1.92.5/` | Dear ImGui (MIT) |
 | `linux/` | scripts for the Linux / Steam Deck build |
 
 ## Setting up the game (players)
 
 Download the release zip, not this repository. On first start the EXE asks for your game files and compiles the game.
-It needs **both** parts of your own dumped copy of Metroid Dread **2.1.0**:
+It needs **both** parts of your own dumped copy of Metroid Prime 4 Beyond **2.1.0**:
 
 - the **ExeFS** (the game code: the files `main`, `main.npdm`, ...)
 - the **RomFS** (the game data: `system`, `packs`, ...), with the 2.1.0 update merged in
@@ -373,13 +373,13 @@ DLLs the game ships beside it. They are not in this repository.
 
 Native Linux (X11 or Wayland through XWayland, OpenGL 4.3), built from this repository with the system's GCC. The
 scripts in `linux/` keep everything inside the repository: the runtime in `bin/`, the installed game in `games/`.
-You need your own Metroid Dread 2.1.0 extracted to an ExeFS and a RomFS folder, as for Windows.
+You need your own Metroid Prime 4 Beyond 2.1.0 extracted to an ExeFS and a RomFS folder, as for Windows.
 
 ```
 bash linux/install_deps.sh                    # gcc, X11/OpenGL headers, static libvpx, SDL2 (asks for sudo)
 bash linux/setup_and_build_runtime.sh         # bin/runtime_linux_x11, with the in-game menu
-bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]   # checks the files, compiles games/Metroid Dread_code.so
-bash linux/run.sh                             # play; settings in games/Metroid Dread.ini, log in games/Metroid Dread.log
+bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]   # checks the files, compiles games/Metroid Prime 4 Beyond_code.so
+bash linux/run.sh                             # play; settings in games/Metroid Prime 4 Beyond.ini, log in games/Metroid Prime 4 Beyond.log
 ```
 
 `linux/run.sh` opens the same Play / setup / settings screens as the Windows EXE (`--play` skips them, `--launcher`
@@ -391,12 +391,12 @@ the mouse free aim and F7 recording.
 
 ### AppImage
 
-`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Dread-x86_64.AppImage`: one file for players, like the Windows
+`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Prime_4_Beyond-x86_64.AppImage`: one file for players, like the Windows
 EXE. It has the runtime with the Play / setup screens, the recompiler, a relocatable GCC 14.3
 ([Bootlin](https://toolchains.bootlin.com)) and Python 3.12
 ([python-build-standalone](https://github.com/astral-sh/python-build-standalone)), so nothing needs to be installed;
 no game files are inside. The downloads are checked against their SHA-256 and kept in `linux/appimage/cache/`. The game
-is installed in `~/.local/share/MetroidDreadRecomp` (or `METROID_DREAD_HOME`). It needs glibc 2.38 or newer, SDL2 for
+is installed in `~/.local/share/MetroidBeyondRecomp` (or `METROID_BEYOND_HOME`). It needs glibc 2.38 or newer, SDL2 for
 controllers and an OpenGL 4.3 driver.
 
 ## What is in this repository
@@ -405,10 +405,10 @@ controllers and an OpenGL 4.3 driver.
   `runtime/vp9/win/libvpx.a` (libvpx 1.14.1, VP9 decoder only, build options in `runtime/vp9/README.txt`) and
   `runtime/oh264/win/*.a` (OpenH264 decoder). Rebuild them from the upstream sources if you prefer.
 - `.gitignore` keeps out toolchains, build output, EXEs, DLLs, archives and anything from a game folder.
-- `dread/dread_v210_patches.json` holds **our** edits only: for each patched file, the SHA-256 of the C that setup
+- `beyond/beyond_patches.json` holds **our** edits only: for each patched file, the SHA-256 of the C that setup
   generates from the player's ExeFS, the line range to replace, and the replacement lines we wrote (frame pacing,
   vector growth, zlib, cutscene skip). It contains no game code, no data from the game and no decryption.
-- `dread/romfs_v210.manifest` lists RomFS file names, sizes and SHA-1 hashes, used only to check the player's files.
+- `beyond/romfs_beyond.manifest` lists RomFS file names, sizes and SHA-1 hashes, used only to check the player's files.
 
 ## Contributors
 
@@ -445,7 +445,7 @@ Each source file keeps its own licence; Apache-2.0 and MIT code is GPL-3.0-compa
 NVIDIA DLAA: the code is here (`dlss.c`), NVIDIA's files are not, and the release is built without it. To add it to
 your own build, see [DLSS.md](DLSS.md). A build with DLSS is for your own use only: never share it.
 
-Metroid Dread is © Nintendo. This project is not affiliated with or endorsed by Nintendo.
+Metroid Prime 4 Beyond is © Nintendo. This project is not affiliated with or endorsed by Nintendo.
 """
 
 if __name__ == '__main__':

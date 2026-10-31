@@ -1,4 +1,4 @@
-// Metroid Dread front end: first-run setup and the Play / settings screens, drawn with Dear ImGui + Direct3D 11
+// Metroid Prime 4 Beyond front end: first-run setup and the Play / settings screens, drawn with Dear ImGui + Direct3D 11
 // in the game's own window before the game starts (backend_win32.c). Direct3D leaves no pixel format on the window,
 // so OpenGL or Vulkan can take it over afterwards: one process, one window.
 // Linux (backend_x11.c): the same screens in their own X11 window with OpenGL 3 (the host at the end of this file); it
@@ -112,11 +112,11 @@ static void apply_env(const IniFile& ini) {
     std::vector<std::string> drop;
 #ifdef _WIN32
     LPWCH all = GetEnvironmentStringsW();
-    for (LPWCH p = all; *p; p += wcslen(p) + 1) { std::string s = utf8(p); if (_strnicmp(s.c_str(), "SWR_", 4) == 0) drop.push_back(s.substr(0, s.find('='))); }
+    for (LPWCH p = all; *p; p += wcslen(p) + 1) { std::string s = utf8(p); if (_strnicmp(s.c_str(), "SWR_", 4) == 0 && _strnicmp(s.c_str(), "SWR_VIDEO_TIMING=", 17) != 0) drop.push_back(s.substr(0, s.find('='))); }
     FreeEnvironmentStringsW(all);
 #else
-    // SWR_RECOMPILER is the AppImage's, not a switch
-    for (char** p = environ; *p; p++) if (!strncmp(*p, "SWR_", 4) && strncmp(*p, "SWR_RECOMPILER=", 15)) { std::string s = *p; drop.push_back(s.substr(0, s.find('='))); }
+    // SWR_RECOMPILER is the AppImage's, not a switch; SWR_VIDEO_TIMING is the timing log asked for in bug reports
+    for (char** p = environ; *p; p++) if (!strncmp(*p, "SWR_", 4) && strncmp(*p, "SWR_RECOMPILER=", 15) && strncmp(*p, "SWR_VIDEO_TIMING=", 17)) { std::string s = *p; drop.push_back(s.substr(0, s.find('='))); }
 #endif
     if (!getenv("SWR_FE_TEST")) for (auto& d : drop) env(d.c_str(), false);
     env("SWR_SYNC_SHADERS", ini.get("wait_for_shaders", "1") == "1");
@@ -227,18 +227,18 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
     ImGui::SetCursorScreenPos({x0, a.y + S(230)});
     ImGui::BeginChild("##sbody", {colw, b.y - a.y - S(330)}, 0, ImGuiWindowFlags_NoBackground);
     if (g_ss == SS_WELCOME) {
-        page_title("FIRST-TIME SETUP", "This turns your own copy of Metroid Dread (version 2.1.0) into a native PC game. "
+        page_title("FIRST-TIME SETUP", "This turns your own copy of Metroid Prime 4 Beyond (Switch build RS15) into a native PC game. "
                    "Nothing from Nintendo is included: you provide the game files, and they are compiled on this PC with the bundled GCC. "
                    "It takes a few minutes and needs about 7 GB of free space here.");
         section("YOUR GAME FILES");
         std::string bl = g_base.empty() ? "CHOOSE" : g_base; if (bl.size() > 48) bl = "..." + bl.substr(bl.size() - 45);
-        if (row_button("##base", "Game folder (with exefs and romfs)", bl.c_str())) { std::string p = pick_folder(g_hwnd, "Choose your extracted Metroid Dread folder"); if (!p.empty()) { g_base = p; set("setup_base", p); } }
-        help_text("Dump the game and its 2.1.0 update from your own Switch and extract them with the update applied (or use an emulator's Extract RomFS / Extract ExeFS with the update installed). "
-                  "That gives the 2.1.0 ExeFS and an already merged RomFS. You can also pick a folder that has exefs and romfs directly.");
+        if (row_button("##base", "Game folder (with exefs and romfs)", bl.c_str())) { std::string p = pick_folder(g_hwnd, "Choose your extracted Metroid Prime 4 Beyond folder"); if (!p.empty()) { g_base = p; set("setup_base", p); } }
+        help_text("Dump the game from your own Switch and extract it with its latest update applied (or use an emulator's Extract RomFS / Extract ExeFS with the update installed). "
+                  "The folder can hold exefs and romfs folders, or the extracted files directly (main, main.npdm, Worlds, UI, Kernel.pak ...).");
         std::string ul = g_update.empty() ? "OPTIONAL" : g_update; if (ul.size() > 48) ul = "..." + ul.substr(ul.size() - 45);
-        if (row_button("##upd", "Update folder (if extracted separately)", ul.c_str())) { std::string p = pick_folder(g_hwnd, "Choose the extracted 2.1.0 update folder"); g_update = p; set("setup_update", p); }
-        help_text("Only if your base game and the 2.1.0 update were extracted to separate folders. The update's ExeFS is used, and its RomFS files are "
-                  "layered over the base game's. Every file is then checked against the 2.1.0 file list, so a partial or unmerged update is caught.");
+        if (row_button("##upd", "Update folder (if extracted separately)", ul.c_str())) { std::string p = pick_folder(g_hwnd, "Choose the extracted update folder"); g_update = p; set("setup_update", p); }
+        help_text("Only if your base game and its update were extracted to separate folders. The update's ExeFS is used, and its RomFS files are "
+                  "layered over the base game's. Every file is then checked against the supported build's file list, so a partial or unmerged update is caught.");
         if (!g_old.empty()) {
             section("BRING OVER FROM YOUR EXISTING INSTALLATION");
             const OldInstall& o = g_old[0];
@@ -269,7 +269,7 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
             }
         }
         if (failed && !running && g_ss == SS_RUNNING) { g_ss = SS_FAILED; g_focus_first = true; }
-        page_title(g_ss == SS_DONE ? "SETUP COMPLETE" : g_ss == SS_FAILED ? "SETUP STOPPED" : "BUILDING METROID DREAD",
+        page_title(g_ss == SS_DONE ? "SETUP COMPLETE" : g_ss == SS_FAILED ? "SETUP STOPPED" : "BUILDING METROID PRIME 4 BEYOND",
                    g_ss == SS_RUNNING ? "You can leave this running. Everything is kept if it stops: Retry continues where it left off." : "");
         double el = ImGui::GetTime() - g_job.t0;
         std::string bar = fmt("%.0f%%  \xE2\x80\x94  %s", pct, stage.c_str());
@@ -357,7 +357,7 @@ static void report_problem() {
     std::string zip, err;
     if (!make_report(info, &zip, &err)) { flash(err); return; }
     if (!g_test) open_in_explorer(reports_dir());
-    std::string url = "https://github.com/yozander2009-stack/Metroid-Dread-Recomp/issues/new?template=bug_report.yml&version=" + url_enc(ver) +
+    std::string url = "https://github.com/" BEYOND_REPO "/issues/new?template=bug_report.yml&version=" + url_enc(ver) +
                       "&gpu=" + url_enc(g_hw.gpu) + "&cpu=" + url_enc(cpu) + (g_hw.ram_gb ? "&ram=" + url_enc(fmt("%d GB", g_hw.ram_gb)) : std::string());
     if (g_test) g_report_url = url; else open_in_explorer(url);
     flash("Logs packed: " + zip + ". Drag it into the bug report.");
@@ -412,7 +412,7 @@ static void page_play() {
     if (row_button("##os", "Open saves folder", "OPEN")) { if (have) open_in_explorer(join(P.data, "save")); else flash("No saves yet."); }
 #ifdef _WIN32   // Linux: the Steam shortcut and updates from the releases page aren't there yet
     section("STEAM");
-    if (row_button("##steam", "Add Metroid Dread to Steam as a non-Steam game", "ADD")) {
+    if (row_button("##steam", "Add Metroid Prime 4 Beyond to Steam as a non-Steam game", "ADD")) {
         std::string m; steam_add_shortcut(P.exe, P.exedir, m); flash(m); }
     help_text("Uses this game's icon. Steam is closed and started again if it's running.");
     section("UPDATES");
@@ -554,7 +554,7 @@ static void page_controls() {
 #endif
     draw_opt("menu_shortcut");
     section("GAME BUTTONS");
-    help_text("Physical position on your controller \xE2\x86\x92 the button Metroid Dread receives. Applies in the game right away. Keyboard and sticks are unchanged.");
+    help_text("Physical position on your controller \xE2\x86\x92 the button Metroid Prime 4 Beyond receives. Applies in the game right away. Keyboard and sticks are unchanged.");
     {
         std::string m = get("controller_map"); int map[16]; for (int i = 0; i < 16; i++) map[i] = i;
         if (!m.empty()) { const char* s = m.c_str(); for (int i = 0; i < 16; i++) { char* e; long v = strtol(s, &e, 10); if (e == s) break; map[i] = (int)v; s = *e == ',' ? e + 1 : e; } }
@@ -613,7 +613,7 @@ static void page_mods() {
     if (row_button("##af", "Add a folder", "CHOOSE")) { std::string d = pick_folder(g_hwnd, "Choose a mod folder (with romfs inside)");
         if (!d.empty()) { std::string n = d.substr(d.find_last_of("\\/") + 1); if (mod_import_folder(d, n, &err)) flash("Mod installed"); else flash(err); g_mods = mods_list(); } }
     if (row_button("##om", "Open the mods folder", "OPEN")) { make_dirs(mods_dir()); open_in_explorer(mods_dir()); }
-    help_text("A mod is a folder with a 'romfs' inside, laid out like the game's own RomFS. Atmosphere-style zips (atmosphere/contents/010093801237C000/romfs) are recognised.");
+    help_text("A mod is a folder with a 'romfs' inside, laid out like the game's own RomFS. Atmosphere-style zips (atmosphere/contents/010019A01E2F2000/romfs) are recognised.");
 }
 
 static void page_advanced() {
@@ -653,16 +653,15 @@ static void page_advanced() {
 }
 
 static void page_about() {
-    page_title("CREDITS", "Metroid Dread recompiled for PC. Metroid Dread is \xC2\xA9 Nintendo; this program contains none of its files and needs your own copy.");
+    page_title("CREDITS", "Metroid Prime 4 Beyond recompiled for PC. Metroid Prime 4 Beyond is \xC2\xA9 Nintendo; this program contains none of its files and needs your own copy.");
     struct C { const char* who; const char* what; } cs[] = {
-        {"yozander2009-stack", "Project lead: this Metroid Dread PC version, its testing and its direction."},
+        {"yozander2009-stack", "Project lead of Metroid Dread Recomp, the PC version this one is built from."},
         {"Claude (Anthropic)", "AI pair programmer: runtime fixes and performance work, this front end and in-game menu, setup, the Linux build, testing and documentation."},
         {"SwitchRecomp by MZ Labs", "The static recompiler and runtime this build is made from (Apache-2.0). \"SwitchRecomp by MZ Labs\" credit and NOTICE kept."},
         {"ScarletNX contributors", "Native Vulkan renderer: GPU front end, Maxwell to SPIR-V shader translation (GPL-3.0)."},
         {"Krydar, Nova77, xSeRosiSx", "Button-icon mods: Switch to XBOX Layout (Krydar), Switch to PS4 Layout (Nova77), Switch to PS5 Layout (xSeRosiSx), downloaded from gamebanana.com when you choose them."},
         {"Xelu's FREE Controller Prompts", "The PlayStation button art in those icon mods."},
         {"Smashicons - Flaticon", "The program icon: Metroid icon created by Smashicons, flaticon.com/free-icons/metroid (Flaticon licence)."},
-        {"theboy181", "60 FPS cutscenes, 21:9 ultrawide and other Dread patches (github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081."},
         {"Dear ImGui by Omar Cornut", "This interface (MIT)."},
         {"SDL2 (Sam Lantinga and contributors)", "Controller support (zlib licence)."},
         {"zlib (Jean-loup Gailly, Mark Adler)", "Fast game-data decompression (zlib licence)."},
@@ -695,7 +694,7 @@ static void sidebar(ImVec2 a, ImVec2 b) {
         y += S(54);
     }
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.62f, {a.x + S(30), b.y - S(56)}, C_DIM, "SwitchRecomp by MZ Labs  \xC2\xB7  ImGui");
-    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.62f, {a.x + S(30), b.y - S(36)}, C_DIM, "Game version 2.1.0");
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.62f, {a.x + S(30), b.y - S(36)}, C_DIM, "Game build RS15 (8275FBE1)");
     ImGui::End();
 }
 
@@ -882,7 +881,7 @@ extern "C" int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler((HWND)h, m, (WPARAM)w, (LPARAM)l)) { *result = 1; return 1; }
     switch (m) {
     case WM_SIZE: if (w != SIZE_MINIMIZED) g_resize = true; *result = 0; return 1;
-    case WM_CLOSE: if (g_job.running) { if (MessageBoxW((HWND)h, L"Setup is still running. Stop it? (You can continue it later.)", L"Metroid Dread", MB_YESNO | MB_ICONQUESTION) != IDYES) { *result = 0; return 1; } setup_cancel(g_job); }
+    case WM_CLOSE: if (g_job.running) { if (MessageBoxW((HWND)h, L"Setup is still running. Stop it? (You can continue it later.)", L"Metroid Prime 4 Beyond", MB_YESNO | MB_ICONQUESTION) != IDYES) { *result = 0; return 1; } setup_cancel(g_job); }
         g_quit = true; *result = 0; return 1;
     case WM_TIMER: if (w == 77) { pads_rumble_off(); KillTimer((HWND)h, 77); } *result = 0; return 1;
     case WM_ERASEBKGND: *result = 1; return 1;
@@ -900,10 +899,10 @@ extern "C" int fe_run(void* hwnd) {
     int ww = std::min(1440, (int)((wa.right - wa.left) * 0.85f)), wh = std::min((int)(ww * 0.625f), (int)((wa.bottom - wa.top) * 0.9f));
     RECT r = {0, 0, ww, wh}; AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     SetWindowPos(g_hwnd, nullptr, wa.left + ((wa.right - wa.left) - (r.right - r.left)) / 2, wa.top + ((wa.bottom - wa.top) - (r.bottom - r.top)) / 2, r.right - r.left, r.bottom - r.top, SWP_NOZORDER);
-    SetWindowTextW(g_hwnd, L"Metroid Dread");
+    SetWindowTextW(g_hwnd, L"Metroid Prime 4 Beyond");
     ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
     if (g_ini.get("fullscreen", "1") == "1") backend_fe_fullscreen(1);
-    if (!d3d_init()) { MessageBoxW(g_hwnd, L"Direct3D 11 is not available: the Play screen can't open. The game will start directly.", L"Metroid Dread", MB_OK | MB_ICONWARNING); apply_env(g_ini); return 0; }
+    if (!d3d_init()) { MessageBoxW(g_hwnd, L"Direct3D 11 is not available: the Play screen can't open. The game will start directly.", L"Metroid Prime 4 Beyond", MB_OK | MB_ICONWARNING); apply_env(g_ini); return 0; }
     IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr; io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -1046,8 +1045,8 @@ static bool x_open() {
     swa.event_mask = KeyPressMask | KeyReleaseMask | StructureNotifyMask | FocusChangeMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | LeaveWindowMask;
     x_win = XCreateWindow(x_dpy, RootWindow(x_dpy, vi->screen), (sw - x_w) / 2, (sh - x_h) / 2, x_w, x_h, 0, vi->depth, InputOutput, vi->visual, CWColormap | CWEventMask | CWBackPixel, &swa);
     XFree(vi);
-    XStoreName(x_dpy, x_win, "Metroid Dread");
-    { XClassHint ch = {(char*)"metroid-dread", (char*)"MetroidDread"}; XSetClassHint(x_dpy, x_win, &ch); }
+    XStoreName(x_dpy, x_win, "Metroid Prime 4 Beyond");
+    { XClassHint ch = {(char*)"metroid-beyond", (char*)"MetroidBeyond"}; XSetClassHint(x_dpy, x_win, &ch); }
     x_wm_delete = XInternAtom(x_dpy, "WM_DELETE_WINDOW", False); XSetWMProtocols(x_dpy, x_win, &x_wm_delete, 1);
     x_state = XInternAtom(x_dpy, "_NET_WM_STATE", False); x_fs = XInternAtom(x_dpy, "_NET_WM_STATE_FULLSCREEN", False);
     XkbSetDetectableAutoRepeat(x_dpy, True, nullptr);

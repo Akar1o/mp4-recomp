@@ -67,7 +67,7 @@ void Paths::init(const char* dir, const char* name) {
     // the recompiler (Python scripts, patches, GCC): the AppImage passes its own copy, a build from source has it next to the game
     const char* r = getenv("SWR_RECOMPILER"); recompiler = r && *r ? r : join(exedir, "recompiler");
     setup_ok = join(data, "setup.ok");
-    appdata = join(data_home(), "MetroidDreadRecomp");
+    appdata = join(data_home(), "MetroidBeyondRecomp");
 }
 
 // ---------------------------------------------------------------- INI (the same line-preserving editor as fe_sys.cpp)
@@ -227,7 +227,8 @@ GameCheck check_installed() {
     GameCheck g;
     g.code_ok = file_exists(P.code) && file_size(P.code) > 50 * 1024 * 1024;
     g.exefs_ok = file_exists(join(P.data, "exefs/main")) && file_exists(join(P.data, "exefs/main.npdm"));
-    g.romfs_ok = dir_exists(join(P.data, "romfs/system")) && dir_exists(join(P.data, "romfs/packs"));
+    // Metroid Prime 4's RomFS: Worlds/ plus Kernel.pak (Dread checked system/ and packs/, which this game does not have)
+    g.romfs_ok = dir_exists(join(P.data, "romfs/Worlds")) && file_exists(join(P.data, "romfs/Kernel.pak"));
     g.data_ok = g.exefs_ok && g.romfs_ok;
     g.setup_ok = file_exists(P.setup_ok);
     if (!g.code_ok) g.summary = "The game has not been compiled yet.";
@@ -236,7 +237,7 @@ GameCheck check_installed() {
     return g;
 }
 
-// ---------------------------------------------------------------- setup process: dread_setup.py, read line by line
+// ---------------------------------------------------------------- setup process: beyond_setup.py, read line by line
 static std::mutex g_mx;
 void setup_lock() { g_mx.lock(); }
 void setup_unlock() { g_mx.unlock(); }
@@ -272,8 +273,8 @@ static void reader(SetupJob* jp, int rd, pid_t pid) {
 }
 
 bool setup_start(SetupJob& j) {
-    std::string py = recompiler_python(), script = join(P.recompiler, "dread_setup.py");
-    if (!file_exists(script)) script = join(P.recompiler, "dread/dread_setup.py");   // SWR_RECOMPILER pointing at the repository
+    std::string py = recompiler_python(), script = join(P.recompiler, "beyond_setup.py");
+    if (!file_exists(script)) script = join(P.recompiler, "beyond/beyond_setup.py");   // SWR_RECOMPILER pointing at the repository
     if (!file_exists(script)) { j.failed = true; j.error = "The recompiler is missing: expected " + script + "."; return false; }
     if (py == "python3" && !on_path("python3")) { j.failed = true; j.error = "Python 3 was not found: install python3, or use the AppImage (it brings its own)."; return false; }
     std::vector<std::string> argv = {py, "-I", "-u", script, "--out", P.exedir, "--name", P.exename, "--base", j.base};
@@ -331,7 +332,7 @@ bool backup_saves(std::string* out, std::string* err) {
     if (dir_size(src) != before) { if (err) *err = "Saves changed during the backup. Close the game and try again."; return false; }
     std::string z = stored_zip(es);
     make_dirs(backups_dir());
-    std::string path = join(backups_dir(), "Metroid-Dread-saves-" + now_stamp() + ".zip");
+    std::string path = join(backups_dir(), "Metroid-Beyond-saves-" + now_stamp() + ".zip");
     if (!write_text(path, z)) { if (err) *err = "Could not write " + path; return false; }
     std::string back = read_text(path);   // verify: same bytes, every entry's CRC still matches
     if (back != z) { if (err) *err = "Backup verification failed."; unlink(path.c_str()); return false; }
@@ -355,7 +356,7 @@ bool make_report(const std::string& info, std::string* out, std::string* err) {
     for (auto& f : files) { std::string p = join(P.exedir, f); if (!file_exists(p)) continue; ZipEntry e; e.name = f; e.data = read_text(p); es.push_back(e); }
     if (es.size() < 2) { if (err) *err = "There are no logs yet. Start the game once, then try again."; return false; }
     make_dirs(reports_dir());
-    std::string path = join(reports_dir(), "Metroid-Dread-report-" + now_stamp() + ".zip");
+    std::string path = join(reports_dir(), "Metroid-Beyond-report-" + now_stamp() + ".zip");
     if (!write_text(path, stored_zip(es))) { if (err) *err = "Could not write " + path; return false; }
     if (out) *out = path; return true;
 }
@@ -382,13 +383,13 @@ void mods_write(const std::vector<Mod>& m) {
     write_text(join(mods_dir(), "load_order.txt"), s);
 }
 static std::string find_romfs(const std::string& root) {
-    const char* id = "010093801237C000";
+    const char* id = "010019A01E2F2000";
     std::string c[] = {join(root, "romfs"), join(root, std::string("atmosphere/contents/") + id + "/romfs"), join(root, std::string("atmosphere/titles/") + id + "/romfs"),
                        join(root, std::string("contents/") + id + "/romfs"), join(root, std::string(id) + "/romfs")};
     for (auto& x : c) if (dir_exists(x)) return x;
     std::string found; walk(root, "", [&](const std::string& r, bool dir, long long) { if (found.empty() && dir) { size_t s = r.find_last_of('/'); std::string leaf = s == std::string::npos ? r : r.substr(s + 1); if (leaf == "romfs") found = join(root, r); } });
     if (!found.empty()) return found;
-    for (const char* d : {"packs", "textures", "system", "gui", "sounds", "actors"}) if (dir_exists(join(root, d))) return root;
+    for (const char* d : {"Worlds", "UI", "Preload", "Patch"}) if (dir_exists(join(root, d))) return root;
     return {};
 }
 bool mod_import_folder(const std::string& src, const std::string& name, std::string* err) {
@@ -399,7 +400,7 @@ bool mod_import_folder(const std::string& src, const std::string& name, std::str
     auto m = mods_list(); mods_write(m); return true;
 }
 bool mod_import_zip(const std::string& zip, std::string* err) {
-    const char* t = getenv("TMPDIR"); std::string dir = join(t && *t ? t : "/tmp", "dreadmod_" + now_stamp()); make_dirs(dir);
+    const char* t = getenv("TMPDIR"); std::string dir = join(t && *t ? t : "/tmp", "beyondmod_" + now_stamp()); make_dirs(dir);
     // Python's zipfile (the bundled Python, or the system's): it refuses names that leave the target folder
     int code = -1; run_capture({recompiler_python(), "-I", "-m", "zipfile", "-e", zip, dir}, &code);
     bool ok = code == 0;

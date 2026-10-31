@@ -22,7 +22,7 @@ vulkan_native/
 # Linux build output (linux/*.sh)
 *.so
 linux/test/
-linux/dist/MetroidDread-Linux/
+linux/dist/MetroidBeyond-Linux/
 linux/dist/*.tar.gz
 linux/dist/*.AppImage
 linux/appimage/cache/
@@ -45,3 +45,4 @@ romfs/
 ExeFS/
 RomFS/
 mods/
+runtime/fsr1_glsl.inc

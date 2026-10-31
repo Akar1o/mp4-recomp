@@ -1,5 +1,5 @@
 @echo off
-rem Builds the Metroid Dread PC EXE from this repository (the steps in the README, with checks first).
+rem Builds the Metroid Prime 4 Beyond PC EXE from this repository (the steps in the README, with checks first).
 rem   build.bat                  the release EXE in bin\runtime_win64_win32.exe
 rem   build.bat release 0.2.2    also packs a release folder in release\ (needs redist\zlib1.dll and redist\SDL2.dll)
 setlocal

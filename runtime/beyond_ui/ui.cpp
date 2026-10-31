@@ -250,8 +250,8 @@ static void spaced_text(ImDrawList* dl, ImVec2 p, float size, ImU32 col, const c
 }
 
 void logo(ImDrawList* dl, ImVec2 pos, float size, bool tag) {
-    spaced_text(dl, pos, size, C_TEXT, "METROID", size * 0.10f, true);
-    spaced_text(dl, {pos.x, pos.y + size * 0.95f}, size * 1.25f, C_RED, "DREAD", size * 0.14f, true);
+    spaced_text(dl, pos, size, C_TEXT, "METROID PRIME 4", size * 0.10f, true);
+    spaced_text(dl, {pos.x, pos.y + size * 0.95f}, size * 1.25f, C_RED, "BEYOND", size * 0.14f, true);
     if (tag) spaced_text(dl, {pos.x + size * 0.04f, pos.y + size * 2.35f}, size * 0.30f, C_CYAN, "RECOMPILED FOR PC", size * 0.08f, false);
 }
 
@@ -496,6 +496,9 @@ static std::vector<Opt> build_options() {
       "The game's 3D resolution. Above your screen's size it is averaged down (smoother edges, no shimmer).");
     C("renderer", "Graphics", "Graphics", "Renderer", LIVE_RESTART, "opengl", {{"opengl", "OpenGL"}, {"vulkan", "Vulkan output"}, {"vulkan_native", "Native Vulkan (experimental)"}},
       "OpenGL is the most tested. Vulkan output: OpenGL draws, Vulkan presents. Native Vulkan: ScarletNX's Vulkan renderer draws everything.");
+    C("upscaler", "Graphics", "Graphics", "Upscaling", LIVE_YES, "bilinear", {{"bilinear", "Bilinear"}, {"fsr", "AMD FSR 1"}},
+      "How a picture rendered below your screen's size is enlarged. FSR 1 rebuilds edges and sharpens (set Internal resolution below 1, e.g. 0.67 or 0.75).");
+    I("fsr_sharpness", "Graphics", "Graphics", "FSR sharpness", LIVE_YES, "80", 0, 100, 5, "FSR 1's sharpening pass (RCAS): 0 = none, 100 = strongest.");
     B("antialiasing", "Graphics", "Graphics", "Anti-aliasing (FXAA)", LIVE_YES, "0", "Smooths jagged edges on the final picture. Not needed above 1\xC3\x97 resolution.");
     C("sharpening", "Graphics", "Graphics", "Sharpening", LIVE_YES, "0", {{"0", "Off"}, {"25", "Low"}, {"50", "Medium"}, {"75", "High"}, {"100", "Maximum"}},
       "Sharpens the final picture. Helps when the game looks soft, most at 1\xC3\x97 resolution.");
@@ -512,9 +515,15 @@ static std::vector<Opt> build_options() {
 #endif
     // Gameplay
     C("fps_limit", "Performance", "Gameplay", "Frame rate", LIVE_YES, "1", {{"1", "60 FPS (console)"}, {"120", "120 FPS"}, {"144", "144 FPS"}, {"240", "240 FPS"}, {"0", "Unlimited"}},
-      "Dread's engine uses real elapsed time, so the game keeps its speed above 60 when your PC holds the cap steadily. Slow-motion moments run at 60.");
+      "Above 60 is untested with Metroid Prime 4 Beyond: if the game runs too fast or stutters, go back to 60.");
+#ifdef _WIN32
     B("forced_vsync", "Performance", "Gameplay", "Force VSync", LIVE_YES, "0", "Can lower FPS a lot on slow PCs.");
+#else
+    B("forced_vsync", "Performance", "Gameplay", "VSync", LIVE_YES, "1", "Frames reach the screen in step with its refresh: no stutter from the two clocks drifting, no tearing.");
+#endif
     B("show_fps", "Graphics", "Gameplay", "FPS counter", LIVE_YES, "0", "Shows the frames per second that reach the screen, in the top-left corner.");
+    I("fov", "Gameplay", "Gameplay", "Field of view", LIVE_YES, "100", 60, 160, 5, "Percent of the game's own field of view. Needs a FOV hook for your game build (beyond/fov_hooks.txt).");
+    B("cheats", "Gameplay", "Gameplay", "Cheat codes", LIVE_YES, "1", "Runs the cheats you turn on in the Cheats page (Atmosphere format files in the game's cheats folder).");
     B("loading_60fps", "Launcher", "Gameplay", "60 FPS elevators and loading screens", LIVE_YES, "1", "The game draws them at 30.");
 #ifndef SWR_NO_SKIPCUT
     B("skip_cutscenes", "Gameplay", "Gameplay", "Skip any cutscene", LIVE_YES, "0", "Hold - to skip a cutscene, even the first time you see it. A prompt shows in the top-left corner while you can.");

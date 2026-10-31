@@ -65,7 +65,7 @@ int steam_vdf_add(const std::string& path, const std::string& name, const std::s
     Node* sc = child(root, "shortcuts");
     if (!sc) { auto n = std::make_unique<Node>(); n->type = 0; n->key = "shortcuts"; sc = n.get(); root.kids.push_back(std::move(n)); }
     std::string qexe = "\"" + exe + "\"";
-    for (auto& e : sc->kids) if (e->type == 0) { Node* x = child(*e, "Exe"); if (x && _stricmp(x->str.c_str(), qexe.c_str()) == 0) { msg = "Metroid Dread is already in Steam."; return 0; } }
+    for (auto& e : sc->kids) if (e->type == 0) { Node* x = child(*e, "Exe"); if (x && _stricmp(x->str.c_str(), qexe.c_str()) == 0) { msg = "Metroid Prime 4 Beyond is already in Steam."; return 0; } }
     int idx = 0; for (auto& e : sc->kids) { int v = atoi(e->key.c_str()); if (v + 1 > idx) idx = v + 1; }
     auto e = std::make_unique<Node>(); e->type = 0; e->key = std::to_string(idx);
     add_int(*e, "appid", crc32(qexe + name) | 0x80000000u);
@@ -120,7 +120,7 @@ int steam_add_shortcut(const std::string& exe, const std::string& dir, std::stri
         if (w != WAIT_OBJECT_0 && steam_running(nullptr)) { msg = "Steam didn't close. Close Steam yourself, then press Add to Steam again."; return -1; }
         Sleep(1000);
     }
-    int r = steam_vdf_add(cfg + "\\shortcuts.vdf", "Metroid Dread", exe, dir, msg);
+    int r = steam_vdf_add(cfg + "\\shortcuts.vdf", "Metroid Prime 4 Beyond", exe, dir, msg);
     if (was) { ShellExecuteA(nullptr, "open", (steam + "\\steam.exe").c_str(), "-silent", nullptr, SW_SHOWMINNOACTIVE); if (r == 1) msg += " Steam was restarted to pick it up."; }
     return r; }
 }   // namespace fe

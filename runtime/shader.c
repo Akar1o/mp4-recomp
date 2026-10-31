@@ -160,7 +160,8 @@ typedef struct {
   int max_idx;
   int has_flow;
   int indent;
-  u8 gtag[256];        /* reg -> global buffer it holds the base of (index+1) */
+  u8 gtag[256];        /* reg -> pointer candidate it holds (base + offset), index+1 into gcand_*; cleared by setr */
+  u8 gcand_idx[64]; u32 gcand_off[64]; int ngcand;   /* constant-buffer words that may be 64-bit GPU addresses */
   u8 tgt[65536/8];     /* branch targets (BRA/SSY/PBK/PCNT and BRX table) */
   u32* pop_tgt;        /* static stack resolution: target of each SYNC/BRK/CONT (0 = unreachable) */
   int stk_static;      /* 1 if SSY/PBK/PCNT got resolved statically (no stack arrays emitted) */
@@ -186,7 +187,7 @@ static char* CBF(Ctx* c, u32 idx, u32 off){ c->si->cbuf_mask|=1u<<idx; if(idx<18
 static void emitl(Ctx* c, const char* f, ...){ char tmp[4096]; va_list ap; va_start(ap,f); vsnprintf(tmp,sizeof tmp,f,ap); va_end(ap);
   for(int i=0;i<c->indent;i++) sb_put(&c->out,"  "); sb_put(&c->out,tmp); sb_put(&c->out,"\n"); }
 
-static void setr(Ctx* c, u32 r, const char* e){ if(r==255) return;   /* RZ: discard */ c->used_reg[r]=1; emitl(c,"r%u = %s;",r,e); }
+static void setr(Ctx* c, u32 r, const char* e){ if(r==255) return;   /* RZ: discard */ c->used_reg[r]=1; c->gtag[r]=0; emitl(c,"r%u = %s;",r,e); }
 
 static void setrf(Ctx* c, u32 r, const char* e){ setr(c,r,T("floatBitsToUint(%s)",e)); }
 
@@ -204,13 +205,21 @@ static u32 cb_idx(u64 w){ return B(w,34,5); }
 
 static u32 cb_off(u64 w){ return B(w,20,14)*4; }
 
-/* is c0[0x110+16k] an NVN ssbo address? returns k+1 or 0 */
-static u8 gbuf_tag(Ctx* c, u64 w){
-  /* gfx ssbos live at c0[0x110..0x210], compute {addr,size} pairs at c0[0x210..0x410] */
-  u32 lo=0x110, hi= c->stage==ST_CS? 0x410 : 0x210;   /* (NVN compute uses 0x310.., deko3d 0x110..) */
-  if(cb_idx(w)!=0) return 0; u32 off=cb_off(w); if(off<lo || off>=hi || (off&15)) return 0;
-  ShaderInfo* si=c->si; for(int i=0;i<si->ngbuf;i++) if(si->gbuf_cbuf_off[i]==off) return (u8)(i+1);
-  if(si->ngbuf>=(c->stage==ST_CS? 16 : 8)) return 0; si->gbuf_cbuf_off[si->ngbuf++]=off; return (u8)si->ngbuf; }
+/* Global memory (LDG/STG): the address is a 64-bit pointer read from a constant buffer plus an offset computed in the
+   shader. A constant-buffer word added or moved into a register makes that register a pointer candidate (gtag); it
+   becomes a global buffer (an SSBO) only when an LDG/STG uses it as its address, so ordinary integer math on constant
+   buffer values costs nothing. NVN keeps its SSBO table at c0[0x110..0x210] ({address, size}; compute up to 0x410);
+   Metroid Prime 4 also reads through pointers of its own (c0[0x510], c1[0], c3[0x130], c8/c9[0]: 230 loads in 47 pixel
+   shaders that were reading 0, the black enemies and flat arm cannon), whose size the runtime finds from the mapping */
+static u8 gcand(Ctx* c, u32 idx, u32 off){ if(off&3) return 0;
+  for(int i=0;i<c->ngcand;i++) if(c->gcand_idx[i]==idx && c->gcand_off[i]==off) return (u8)(i+1);
+  if(c->ngcand>=64) return 0; c->gcand_idx[c->ngcand]=(u8)idx; c->gcand_off[c->ngcand]=off; return (u8)++c->ngcand; }
+static u8 gbuf_tag(Ctx* c, u64 w){ return gcand(c,cb_idx(w),cb_off(w)); }
+static int gbuf_slot(Ctx* c, u8 t){ if(!t) return -1; u32 idx=c->gcand_idx[t-1], off=c->gcand_off[t-1]; ShaderInfo* si=c->si;
+  for(int i=0;i<si->ngbuf;i++) if(si->gbuf_cbuf_off[i]==off && si->gbuf_cbuf_idx[i]==idx) return i;
+  if(si->ngbuf>=(c->stage==ST_CS? 16 : 8)) return -1;
+  u32 lo=0x110, hi= c->stage==ST_CS? 0x410 : 0x210; int i=si->ngbuf++;
+  si->gbuf_cbuf_off[i]=off; si->gbuf_cbuf_idx[i]=(u8)idx; si->gbuf_sized[i]=(u8)(idx==0 && off>=lo && off<hi && !(off&15)); return i; }
 
 static char* imm20f(u64 w){ u32 v=(B(w,20,19)<<12)|(B(w,56,1)<<31); return T("uintBitsToFloat(0x%Xu)",v); }
 
@@ -231,7 +240,7 @@ static int kind_of(int id, int base){ return id-base; }
 
 static char* fneg_abs(const char* e, int neg, int abs){ const char* x=e; if(abs) x=T("abs(%s)",x); if(neg) x=T("(-%s)",x); return (char*)x; }
 
-static char* fsat(const char* e, int sat){ return sat? T("clamp(%s,0.0,1.0)",e) : (char*)e; }
+static char* fsat(const char* e, int sat){ return sat? T("fsat(%s)",e) : (char*)e; }   /* Maxwell .SAT: NaN -> 0 */
 
 static const char* fcmp_expr(u32 op, const char* a, const char* b){
   switch(op){ case 0: return "false"; case 1: return T("(%s < %s)",a,b); case 2: return T("(%s == %s)",a,b); case 3: return T("(%s <= %s)",a,b);
@@ -377,6 +386,12 @@ static void unsupported(Ctx* c, const char* name, u64 w){ c->si->unsupported++; 
 
 static void inst(Ctx* c, u32 idx, u64 w, const Op* op);
 
+/* condition-code test of flow instructions (bits 0-4) and CSETP: Maxwell's flow tests over the Z/S flags (overflow
+   and NaN flags aren't tracked) */
+static const char* cc_flow(u32 ft){
+  switch(ft){ case 0: case 8: return "false"; case 1: case 9: return "cc_s"; case 2: case 10: return "cc_z"; case 3: case 11: return "(cc_s || cc_z)";
+    case 4: case 12: return "(!cc_s && !cc_z)"; case 5: case 13: return "(!cc_z)"; case 6: case 14: return "(!cc_s)"; default: return "true"; } }
+
 static void emit_guarded(Ctx* c, u32 idx, u64 w, const Op* op){
   u32 pg=B(w,16,3), pn=B(w,19,1);
   int id=op->id;
@@ -384,6 +399,10 @@ static void emit_guarded(Ctx* c, u32 idx, u64 w, const Op* op){
   /* SSY/PBK/PCNT/PRET/CAL ignore the predicate field (reads as P0) */
   if(id==O_SSY||id==O_PBK||id==O_PCNT||id==O_PRET||id==O_CAL||id==O_PEXIT){ inst(c,idx,w,op); return; }
   if(pg==7 && pn){ emitl(c,"/* never: %s */",op->name); return; }
+  /* a flow instruction also tests the condition codes (EXIT CC.NEU after ISET.CC: Prime 4's froxel writer ends its
+     last slice that way; without it the fog volume's far slice stayed empty and the sky came out black) */
+  const char* ft= (id==O_BRA||id==O_EXIT||id==O_KIL||id==O_BRK||id==O_CONT||id==O_SYNC)? cc_flow(B(w,0,5)) : "true";
+  if(strcmp(ft,"true")){ c->uses_cc=1; emitl(c,"if(%s && %s) {",pg==7? "true" : PN(c,pg,pn),ft); c->indent++; inst(c,idx,w,op); c->indent--; emitl(c,"}"); return; }
   if(pg==7 || is_flow==2){ inst(c,idx,w,op); return; }
   emitl(c,"if(%s) {",PN(c,pg,pn)); c->indent++; inst(c,idx,w,op); c->indent--; emitl(c,"}");
 }
@@ -435,7 +454,7 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     setrf(c,d,fsat(B(w,53,2)==2? T("ffmz(%s, %s, %s)",A,imm32f(w),Cv) : T("fma(%s, %s, %s)",A,imm32f(w),Cv),B(w,55,1))); break; }
   case O_FMNMX_R: case O_FMNMX_C: case O_FMNMX_I: {
     char* A=fneg_abs(RF(c,a),B(w,48,1),B(w,46,1)); char* Bv=fneg_abs(opBf(c,w,id-O_FMNMX_R),B(w,45,1),B(w,49,1));
-    setrf(c,d,T("(%s ? min(%s, %s) : max(%s, %s))",PN(c,B(w,39,3),B(w,42,1)),A,Bv,A,Bv)); break; }
+    setrf(c,d,T("(%s ? fmn(%s, %s) : fmx(%s, %s))",PN(c,B(w,39,3),B(w,42,1)),A,Bv,A,Bv)); break; }   /* FMNMX returns the non-NaN operand */
   case O_FSETP_R: case O_FSETP_C: case O_FSETP_I: {
     char* A=fneg_abs(RF(c,a),B(w,43,1),B(w,7,1)); char* Bv=fneg_abs(opBf(c,w,id-O_FSETP_R),B(w,6,1),B(w,44,1));
     const char* t=fcmp_expr(B(w,48,4),A,Bv); const char* pc=PN(c,B(w,39,3),B(w,42,1));
@@ -490,7 +509,7 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     else { if(df==0) v= ds? T("bitfieldExtract(%s,0,8)",v) : T("(%s & 255)",v); else if(df==1) v= ds? T("bitfieldExtract(%s,0,16)",v) : T("(%s & 65535)",v); }
     setr(c,d,T("uint(%s)",v)); break; }
   /* ---------------- moves */
-  case O_MOV_R: case O_MOV_C: case O_MOV_I: if(d!=255) c->gtag[d]= id==O_MOV_C? gbuf_tag(c,w) : id==O_MOV_R? c->gtag[B(w,20,8)] : 0; setr(c,d,opB(c,w,id-O_MOV_R)); break;
+  case O_MOV_R: case O_MOV_C: case O_MOV_I: { u8 tg= id==O_MOV_C? gbuf_tag(c,w) : id==O_MOV_R? c->gtag[B(w,20,8)] : 0; setr(c,d,opB(c,w,id-O_MOV_R)); if(d!=255) c->gtag[d]=tg; break; }
   case O_MOV32I: setr(c,d,imm32(w)); break;
   case O_S2R: {
     u32 sr=B(w,20,8); const char* v="0u";
@@ -505,26 +524,31 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
   case O_CS2R: setr(c,d,"0u"); if(d!=255) setr(c,d+1,"0u"); break;
   /* ---------------- integer */
   case O_IADD_R: case O_IADD_C: case O_IADD_I: {
-    if(d!=255){ u8 tg=0; if(id==O_IADD_C) tg=gbuf_tag(c,w); if(!tg) tg=c->gtag[a]; c->gtag[d]=tg; }
+    u8 tg=0; if(id==O_IADD_C) tg=gbuf_tag(c,w); if(!tg) tg=c->gtag[a]; if(!tg && id==O_IADD_R) tg=c->gtag[B(w,20,8)];
     char* A=R(c,a); char* Bv=opB(c,w,id-O_IADD_R); if(B(w,49,1)) A=T("(0u-%s)",A); if(B(w,48,1)) Bv=T("(0u-%s)",Bv);
-    const char* e=T("(%s + %s)",A,Bv); if(B(w,43,1)) e=T("(%s + (cc_c?1u:0u))",e);
+    /* .X (add the carry) reads cc_c even when this shader never sets it: the flags must be declared then too, else
+       the GLSL does not compile (Metroid Prime 4's vertex-pulling shaders: their objects were never drawn) */
+    const char* e=T("(%s + %s)",A,Bv); if(B(w,43,1)){ e=T("(%s + (cc_c?1u:0u))",e); c->uses_cc=1; }
     if(B(w,47,1)){ c->uses_cc=1; emitl(c,"{ uint t_ = %s; uint c1_; uint s_ = uaddCarry(%s,%s,c1_); uint c2_=0u; %s cc_c = (c1_|c2_)!=0u; cc_z = t_==0u; cc_s = int(t_)<0; t_=s_%s; %s }",
         e,A,Bv, B(w,43,1)? "s_ = uaddCarry(s_, cc_c?1u:0u, c2_);" : "", "", d!=255? T("r%u = t_;",d) : ""); c->used_reg[d]=1; }
     else setr(c,d,e);
+    if(d!=255) c->gtag[d]=tg;
     break; }
-  case O_IADD32I: { char* A=R(c,a); if(B(w,56,1)) A=T("(0u-%s)",A); const char* e=T("(%s + %s)",A,imm32(w)); if(B(w,53,1)) e=T("(%s + (cc_c?1u:0u))",e);
+  case O_IADD32I: { u8 tg32=c->gtag[a]; char* A=R(c,a); if(B(w,56,1)) A=T("(0u-%s)",A); const char* e=T("(%s + %s)",A,imm32(w)); if(B(w,53,1)){ e=T("(%s + (cc_c?1u:0u))",e); c->uses_cc=1; }
     if(B(w,52,1)){ c->uses_cc=1; emitl(c,"{ uint c1_; uint s_ = uaddCarry(%s,%s,c1_); cc_c = c1_!=0u; cc_z = s_==0u; cc_s=int(s_)<0; }",A,imm32(w)); }
-    setr(c,d,e); break; }
+    setr(c,d,e); if(d!=255) c->gtag[d]=tg32; break; }
   case O_IADD3_R: case O_IADD3_C: case O_IADD3_I: {
+    u8 tg3= id==O_IADD3_C? gbuf_tag(c,w) : 0; if(!tg3) tg3=c->gtag[a]; if(!tg3 && id==O_IADD3_R) tg3=c->gtag[B(w,20,8)]; if(!tg3) tg3=c->gtag[B(w,39,8)];
     char* A=R(c,a); char* Bv= id==O_IADD3_R? R(c,B(w,20,8)) : id==O_IADD3_C? CB(c,cb_idx(w),cb_off(w)) : imm20i(w); char* Cv=R(c,B(w,39,8));
     if(id==O_IADD3_R){ static const char* hs[4]={"%s","(%s & 0xFFFFu)","(%s >> 16)","%s"}; A=T(hs[B(w,35,2)],A); Bv=T(hs[B(w,33,2)],Bv); Cv=T(hs[B(w,31,2)],Cv); }
     if(B(w,51,1)) A=T("(0u-%s)",A); if(B(w,50,1)) Bv=T("(0u-%s)",Bv); if(B(w,49,1)) Cv=T("(0u-%s)",Cv);
     const char* ab=T("(%s + %s)",A,Bv);
     if(id==O_IADD3_R){ u32 sh=B(w,37,2); if(sh==1) ab=T("(%s >> 16)",ab); else if(sh==2) ab=T("(%s << 16)",ab); }
-    setr(c,d,T("(%s + %s)",ab,Cv)); break; }
-  case O_ISCADD_R: case O_ISCADD_C: case O_ISCADD_I: {
+    setr(c,d,T("(%s + %s)",ab,Cv)); if(d!=255) c->gtag[d]=tg3; break; }
+  case O_ISCADD_R: case O_ISCADD_C: case O_ISCADD_I: {   /* (index << s) + base: the base carries the pointer */
+    u8 tgs= id==O_ISCADD_C? gbuf_tag(c,w) : id==O_ISCADD_R? c->gtag[B(w,20,8)] : 0;
     char* A=R(c,a); char* Bv=opB(c,w,id-O_ISCADD_R); if(B(w,49,1)) A=T("(0u-%s)",A); if(B(w,48,1)) Bv=T("(0u-%s)",Bv);
-    setr(c,d,T("((%s << %uu) + %s)",A,B(w,39,5),Bv)); break; }
+    setr(c,d,T("((%s << %uu) + %s)",A,B(w,39,5),Bv)); if(d!=255) c->gtag[d]=tgs; break; }
   case O_ISCADD32I: setr(c,d,T("((%s << %uu) + %s)",R(c,a),B(w,53,5),imm32(w))); break;
   case O_IMNMX_R: case O_IMNMX_C: case O_IMNMX_I: {
     char* A=R(c,a); char* Bv=opB(c,w,id-O_IMNMX_R); const char* pr=PN(c,B(w,39,3),B(w,42,1));
@@ -535,7 +559,9 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     setp2(c,B(w,3,3),B(w,0,3),B(w,45,2),t,pc); break; }
   case O_ISET_R: case O_ISET_C: case O_ISET_I: {
     const char* t=bop(B(w,45,2),icmp_expr(B(w,49,3),R(c,a),opB(c,w,id-O_ISET_R),B(w,48,1)),PN(c,B(w,39,3),B(w,42,1)));
-    setr(c,d,T("(%s ? %s : 0u)",t,B(w,44,1)? "floatBitsToUint(1.0)" : "0xFFFFFFFFu")); break; }
+    const char* v=T("(%s ? %s : 0u)",t,B(w,44,1)? "floatBitsToUint(1.0)" : "0xFFFFFFFFu");
+    if(B(w,47,1)){ c->uses_cc=1; emitl(c,"{ uint t_ = %s; cc_z = t_==0u; cc_s = int(t_)<0; cc_c = false;",v); c->indent++; setr(c,d,"t_"); c->indent--; emitl(c,"}"); break; }   /* .CC */
+    setr(c,d,v); break; }
   case O_ICMP_R: case O_ICMP_RC: case O_ICMP_CR: case O_ICMP_I: {
     char *Bv,*Cv;
     if(id==O_ICMP_R){ Bv=R(c,B(w,20,8)); Cv=R(c,B(w,39,8)); } else if(id==O_ICMP_RC){ Bv=R(c,B(w,39,8)); Cv=CB(c,cb_idx(w),cb_off(w)); }
@@ -664,6 +690,20 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
   /* ---------------- attribs + memory */
   case O_IPA: {
     u32 addr=B(w,30,8)*4; const char* v=attr_read(c,addr,0);
+    if(B(w,38,1) && c->stage==ST_FS && B(w,8,8)!=255){
+      /* indexed (IPA.IDX): the address comes from a register; Prime 4's materials pick their UV set and tangent
+         frame this way. A switch over the generic inputs the program header declares, each interpolated like IPA */
+      u32 mode=B(w,54,2); emitl(c,"{ uint aa_ = %s; uint ip_ = 0u;",R(c,B(w,8,8)));   /* the register holds the whole address (the shaders add the base themselves) */ c->indent++;
+      if(mode==1) emitl(c,"float im_ = uintBitsToFloat(%s);",R(c,B(w,20,8)));
+      emitl(c,"switch(aa_){"); c->indent++;
+      for(u32 gi=0;gi<32;gi++) for(u32 cp=0;cp<4;cp++){ u32 im=(c->si->sph[6+gi/4]>>((gi%4)*8+cp*2))&3; if(!im) continue;
+        const char* e=attr_read(c,0x80+gi*16+cp*4,0);
+        if(im==2) e=T("floatBitsToUint(uintBitsToFloat(%s)*(1.0/gl_FragCoord.w))",e);
+        if(mode==1) e=T("floatBitsToUint(uintBitsToFloat(%s)*im_)",e);
+        emitl(c,"case %uu: ip_ = %s; break;",0x80+gi*16+cp*4,e); }
+      emitl(c,"default: break;"); c->indent--; emitl(c,"}");
+      setr(c,d,B(w,51,1)? "floatBitsToUint(clamp(uintBitsToFloat(ip_),0.0,1.0))" : "ip_");
+      c->indent--; emitl(c,"}"); break; }
     if(B(w,38,1)) v="0u";
     /* hw semantics: perspective generics come out pre-multiplied by w (1/gl_FragCoord.w). PASS keeps that,
        MULTIPLY multiplies by the given reg */
@@ -677,10 +717,19 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     else if(c->stage==ST_FS && addr==0x7C && B(w,54,2)==0 && !B(w,51,1)){ c->tag_r=(int)d; c->tag_v=1; }
     if(B(w,51,1)) v=T("floatBitsToUint(clamp(uintBitsToFloat(%s),0.0,1.0))",v);
     setr(c,d,v); break; }
+  /* AL2P: attribute number to attribute address. Outside tessellation patches that is the register plus the offset
+     (11-bit signed); the address then feeds an indexed ALD/AST. 200 of Metroid Prime 4's shaders use it */
+  case O_AL2P: { i32 off=(i32)(B(w,20,11)<<21)>>21; setr(c,d,T("(%s + %uu)",R(c,a),(u32)off)); break; }
   case O_ALD: {
     u32 addr=B(w,20,10), n=B(w,47,2)+1; int is_out=B(w,32,1);
-    if(B(w,8,8)!=255){ /* indexed attribs: only generic-by-register */
-      for(u32 k=0;k<n;k++) setr(c,d+k,"0u"); unsupported(c,"indirect ALD",w); break; }
+    if(B(w,8,8)!=255){ /* indexed: a switch over position and the 16 generic attributes (as AST below), unknown = 0 */
+      emitl(c,"{ uint aa_ = %s + %uu;",R(c,B(w,8,8)),addr); c->indent++;
+      for(u32 k=0;k<n;k++){ u32 rd=d+k; if(rd==255) continue; c->used_reg[rd]=1;
+        emitl(c,"switch(aa_ + %uu){",k*4); c->indent++;
+        for(u32 q=0;q<4;q++) emitl(c,"case %uu: r%u = %s; break;",0x70+q*4,rd,attr_read(c,0x70+q*4,is_out));
+        for(u32 i=0;i<16;i++) for(u32 q=0;q<4;q++) emitl(c,"case %uu: r%u = %s; break;",0x80+i*16+q*4,rd,attr_read(c,0x80+i*16+q*4,is_out));
+        emitl(c,"default: r%u = 0u; break;",rd); c->indent--; emitl(c,"}"); }
+      c->indent--; emitl(c,"}"); break; }
     for(u32 k=0;k<n;k++) setr(c,d+k,attr_read(c,addr+k*4,is_out));
     break; }
   case O_AST: {
@@ -722,21 +771,21 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
       else emitl(c,"%s[%s] = %s;",mem,ix,R(c,d+k)); }
     c->indent--; emitl(c,"}");
     break; }
-  case O_LDG: if(c->gtag[a]){
-    /* ssbo load, addr = c0[off] + offset */
-    int gi=c->gtag[a]-1; u32 goff=c->si->gbuf_cbuf_off[gi]; i32 imm=(i32)(B(w,20,24)<<8)>>8; u32 sz=B(w,48,3);
+  case O_LDG: if(gbuf_slot(c,c->gtag[a])>=0){
+    /* ssbo load, addr = cb[idx][off] + offset */
+    int gi=gbuf_slot(c,c->gtag[a]); u32 goff=c->si->gbuf_cbuf_off[gi], gidx=c->si->gbuf_cbuf_idx[gi]; i32 imm=(i32)(B(w,20,24)<<8)>>8; u32 sz=B(w,48,3);
     c->si->uses_global=1;
-    emitl(c,"{ uint o_ = %s + %uu - %s;",R(c,a),(u32)imm,CB(c,0,goff)); c->indent++;
+    emitl(c,"{ uint o_ = %s + %uu - %s;",R(c,a),(u32)imm,CB(c,gidx,goff)); c->indent++;
     if(sz<=3){ const char* v=T("((g%d.d[o_>>2u] >> ((o_&3u)*8u)) & %s)",gi, sz<=1? "0xFFu" : "0xFFFFu");
       if(sz==1) v=T("uint(int(%s<<24u)>>24)",v); else if(sz==3) v=T("uint(int(%s<<16u)>>16)",v); setr(c,d,v); }
     else { u32 n= sz==5? 2 : sz>=6? 4 : 1; for(u32 k=0;k<n;k++) setr(c,d+k,T("g%d.d[(o_>>2u)+%uu]",gi,k)); }
     c->indent--; emitl(c,"}"); break; }
     /* unknown base -> unsupported */
-  case O_STG: if(id==O_STG && c->gtag[a]){
+  case O_STG: if(id==O_STG && gbuf_slot(c,c->gtag[a])>=0){
     /* ssbo store: 32/64/128 direct, 8/16 via atomics so neighbours survive */
-    int gi=c->gtag[a]-1; u32 goff=c->si->gbuf_cbuf_off[gi]; i32 imm=(i32)(B(w,20,24)<<8)>>8; u32 sz=B(w,48,3);
+    int gi=gbuf_slot(c,c->gtag[a]); u32 goff=c->si->gbuf_cbuf_off[gi], gidx=c->si->gbuf_cbuf_idx[gi]; i32 imm=(i32)(B(w,20,24)<<8)>>8; u32 sz=B(w,48,3);
     c->si->uses_global=1; c->si->gbuf_wmask|=1u<<gi;
-    emitl(c,"{ uint o_ = %s + %uu - %s;",R(c,a),(u32)imm,CB(c,0,goff)); c->indent++;
+    emitl(c,"{ uint o_ = %s + %uu - %s;",R(c,a),(u32)imm,CB(c,gidx,goff)); c->indent++;
     if(sz<=3){ const char* m= sz<=1? "0xFFu" : "0xFFFFu"; emitl(c,"uint s_=(o_&3u)*8u; atomicAnd(g%d.d[o_>>2u], ~(%s<<s_)); atomicOr(g%d.d[o_>>2u], (%s & %s)<<s_);",gi,m,gi,R(c,d),m); }
     else { u32 n= sz==5? 2 : sz>=6? 4 : 1; for(u32 k=0;k<n;k++) emitl(c,"g%d.d[(o_>>2u)+%uu] = %s;",gi,k,R(c,d+k)); }
     c->indent--; emitl(c,"}"); break; }
@@ -780,7 +829,9 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
        .P = formatted (mask 20..23), .D = raw bytes (size 20..22) converted using the format class
        uniforms swr_ic / swr_tc the runtime sets at dispatch */
     u32 isd=B(w,52,1), bound=B(w,51,1), ty=B(w,33,3), ra=a, rdd=d;
-    if(c->stage!=ST_CS || ty==1 || ty>5){ unsupported(c, id==O_SUST? "SUST" : "SULD", w); if(id==O_SULD && rdd!=255){ setr(c,rdd,"0u"); } break; }
+    /* vertex and pixel shaders too: Metroid Prime 4 fills its 88x51x64 froxel volume (volumetric fog and light) from a
+       vertex shader drawing one point per froxel column, with formatted 3D image stores */
+    if((c->stage!=ST_CS && c->stage!=ST_VS && c->stage!=ST_FS) || ty==1 || ty>5){ unsupported(c, id==O_SUST? "SUST" : "SULD", w); if(id==O_SULD && rdd!=255){ setr(c,rdd,"0u"); } break; }
     u32 off=0, bank=0; int bl=0;
     if(bound) off=B(w,36,13);
     else { u32 bo; if(!track_handle(c,idx,B(w,39,8),&bank,&bo)){ unsupported(c, id==O_SUST? "SUST.B (untracked handle)" : "SULD.B (untracked handle)", w); if(id==O_SULD) setr(c,rdd,"0u"); break; } off=bo/4; bl=1; }
@@ -829,7 +880,9 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     }
     int s=tex_slot(c,off,type,array,0,1);
     if(type==0) crd=T("ivec2(%s, 0)",crd);
-    const char* smp= ofs? T("texelFetch(tex%d, %s + ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4)), %s)",s,crd,ofs,ofs,lod) : T("texelFetch(tex%d, %s, %s)",s,crd,lod);
+    if(ofs) crd=T("(%s + ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4)))",crd,ofs,ofs);
+    if(type==1 && (c->stage==ST_FS || c->stage==ST_VS)){ crd=T("swr_fc(%s, %d)",crd,s); c->si->uses_position_in=1; }
+    const char* smp= T("texelFetch(tex%d, %s, %s)",s,crd,lod);
     emitl(c,"{ vec4 t_ = %s;",IW(c,s,smp)); c->indent++; write_texs(c,w,"t_",!B(w,59,1)); c->indent--; emitl(c,"}");   /* bit59: fp32 */
     break; }
   case O_TLD4S: {
@@ -869,7 +922,8 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     if(array && eid==O_TLD) crd=T("ivec%d(%s, int(%s))",dim+1,crd,arr);
     const char* smp;
     if(eid==O_TMML){ smp= g_glsl_es? "vec4(0.0)" : T("vec4(textureQueryLod(tex%d, %s), 0.0, 0.0)",s,crd); }
-    else if(eid==O_TLD){ smp=T("texelFetch(tex%d, %s, %s)",s,crd,lod?lod:"0"); }
+    else if(eid==O_TLD){ if(dim==2 && !array && (c->stage==ST_FS || c->stage==ST_VS)){ crd=T("swr_fc(%s, %d)",crd,s); c->si->uses_position_in=1; }
+      smp=T("texelFetch(tex%d, %s, %s)",s,crd,lod?lod:"0"); }
     else if(eid==O_TLD4){ u32 comp=B(w,56,2); smp= dc? T("textureGather(tex%d, %s, %s)",s,crd,dref) : T("textureGather(tex%d, %s, %u)",s,crd,comp); }
     else if(eid==O_TXD){ smp=T("texture(tex%d, %s)",s,crd); }
     else {
@@ -1081,7 +1135,7 @@ static int stk_resolve(Ctx* c, u32 n, int fwd, const u32* brx_all, int brx_n){
       if(!IDX_OK(i)) continue;
       if(i!=ldr[L] && is_leader(c,i)){ ok=stk_succ(&A,i-1,i,&s); break; }   /* fall through */
       const Op* op=decode(c->w[i]); if(!op) continue;
-      u64 w=c->w[i]; int id=op->id; u32 pg=B(w,16,3), pn=B(w,19,1); int always= pg==7 && !pn;
+      u64 w=c->w[i]; int id=op->id; u32 pg=B(w,16,3), pn=B(w,19,1); int always= pg==7 && !pn && !strcmp(cc_flow(B(w,0,5)),"true");   /* flow ops only below */
       int kk= id==O_SSY||id==O_SYNC? 0 : id==O_PBK||id==O_BRK? 1 : 2;
       if(id==O_SSY||id==O_PBK||id==O_PCNT){ if(s.n[kk]>=16){ ok=0; break; } s.s[kk][s.n[kk]++]=bra_target(w,i); continue; }   /* unpredicated */
       if(pg==7 && pn) continue;                                           /* never runs */
@@ -1110,7 +1164,10 @@ static u32 st_jump(Ctx* c, u32 i, const Op* op){
   if(t<=i) return ~0u;                                       /* backward branch or unreachable pop */
   u32 nx=i+1; while(nx<c->nwords && !IDX_OK(nx)) nx++;
   return t==nx? 0 : t; }                                     /* branch to i+1, no-op */
-static int st_uncond(Ctx* c, u32 i){ u64 w=c->w[i]; return B(w,16,3)==7 && !B(w,19,1); }
+static int st_uncond(Ctx* c, u32 i){ u64 w=c->w[i]; if(!(B(w,16,3)==7 && !B(w,19,1))) return 0;
+  const Op* op=decode(w); int id= op? op->id : -1;   /* a flow op with a condition-code test is conditional */
+  if(id==O_BRA||id==O_EXIT||id==O_KIL||id==O_BRK||id==O_CONT||id==O_SYNC) return !strcmp(cc_flow(B(w,0,5)),"true");
+  return 1; }
 
 /* jt[i]: 0 normal, ~0u becomes 'else', otherwise the equivalent nearer target */
 static int st_check(Ctx* c, u32 n, u32* jt){
@@ -1231,7 +1288,11 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
     else if(g_vs_layer_ext==3) sb_put(D,"#extension GL_NV_viewport_array2 : require\n#define SWR_SET_LAYER(v) gl_Layer=(v)\n");
     else sb_put(D,"#define SWR_SET_LAYER(v)\n"); }
   if(stage==ST_FS && (si->sph[0]>>15&1)) {}
-  if(stage==ST_FS && si->uses_position_in) sb_f(D,"layout(std140, binding=%d) uniform SWR_RS { vec4 swr_rs; };\n",g_rs_binding);   /* 1/res scale */
+  if((stage==ST_FS || stage==ST_VS) && si->uses_position_in) sb_f(D,"layout(std140, binding=%d) uniform SWR_RS { vec4 swr_rs; uvec4 swr_rm; };\n",g_rs_binding);   /* 1/res scale */
+  /* texelFetch takes guest texel coordinates; render targets are stored at the resolution scale (swr_rs.z), so a
+     fetch from one (bit set in swr_rm.x for the pixel stage, .y for the vertex stage, per texture slot) is scaled.
+     Prime 4's fog reads the depth buffer this way, and its froxel writer (a vertex shader) the density buffer */
+  if((stage==ST_FS || stage==ST_VS) && si->uses_position_in) sb_f(D,"ivec2 swr_fc(ivec2 c, int u){ return ((swr_rm.%c>>uint(u))&1u)!=0u ? ivec2(vec2(c)*swr_rs.z) : c; }\n",stage==ST_FS?'x':'y');
   /* packed binding numbers, Intel's windows driver has very few: VS 0.., FS 1.., others 2.. */
   int slot= stage==ST_VS? 0 : stage==ST_FS? 1 : 2;
   int base_bind=slot*18;
@@ -1254,8 +1315,10 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
   }
   if(c->uses_local) sb_put(D,"uint lmem[1024];\n");
   if(c->uses_shared) sb_f(D,"shared uint smem[%d];\n", stage==ST_CS && si->shared_size>0? (si->shared_size+3)/4 : 16384);
-  if(stage==ST_CS){ static const char* it[6]={"image1D","imageBuffer","image1DArray","image2D","image2DArray","image3D"};
-    for(int k=0;k<si->nimg;k++) sb_f(D,"layout(binding=%d) writeonly uniform %s img%d;\n",k,it[si->img[k].type],k);
+  if(stage==ST_CS || si->nimg || c->uses_img_raw){ static const char* it[6]={"image1D","imageBuffer","image1DArray","image2D","image2DArray","image3D"};
+    /* image units: compute 0-7; vertex 0-3, pixel 4-7 (both bound for one draw; gpu_gl.c bind_imgs) */
+    int ib= stage==ST_FS? 4 : 0;
+    for(int k=0;k<si->nimg;k++) sb_f(D,"layout(binding=%d) writeonly uniform %s img%d;\n",ib+k,it[si->img[k].type],k);
     if(c->uses_img_raw){
       /* format class: 0 f32, 1 f16, 2 unorm8, 3 unorm16 */
       sb_put(D,"uniform int swr_ic[8];\nuniform int swr_tc[32];\nuniform int swr_ib[8];\nuniform int swr_tb[32];\n"
@@ -1274,7 +1337,10 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
   { const char* b=c->out.p? c->out.p : ""; int f1=0, f2=strstr(b,"ffmz(")!=NULL;   /* only when needed */
     for(const char* q=b; (q=strstr(q,"fmz(")); q++) if(q==b || q[-1]!='f'){ f1=1; break; }
     if(f1) sb_put(D,"float fmz(float a, float b){ return (a==0.0 || b==0.0) ? 0.0 : a*b; }\n");
-    if(f2) sb_put(D,"float ffmz(float a, float b, float c){ return (a==0.0 || b==0.0) ? c : fma(a,b,c); }\n"); }
+    if(f2) sb_put(D,"float ffmz(float a, float b, float c){ return (a==0.0 || b==0.0) ? c : fma(a,b,c); }\n");
+    if(strstr(b,"fsat(")) sb_put(D,"float fsat(float x){ return isnan(x) ? 0.0 : clamp(x,0.0,1.0); }\n");
+    if(strstr(b,"fmn(")) sb_put(D,"float fmn(float a, float b){ return isnan(a) ? b : (isnan(b) ? a : min(a,b)); }\n");
+    if(strstr(b,"fmx(")) sb_put(D,"float fmx(float a, float b){ return isnan(a) ? b : (isnan(b) ? a : max(a,b)); }\n"); }
   sb_put(D,"void main(){\n");
   /* Position components omitted by a vertex shader must remain deterministic.
      Screen-space passes commonly write only X/Y; undefined Z/W can clip a

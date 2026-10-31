@@ -24,8 +24,12 @@ static PMutex g_logw; static PCond g_lq_cv;
 static void log_emit(const char* q, u32 n){
   for(u32 at=0; at+4<=n;){ u32 h; memcpy(&h,q+at,4); at+=4; u32 L=h&0xFFFF, pre=(h>>16)&0x7FFF;
     if(!g_logf){ char p[1200], q[1220]; const char* n=g_exename[0]?g_exename:"switchrecomp";
-      /* keep the last run's log (a crash report needs it; the player restarts the game to send it) */
-      snprintf(p,sizeof p,"%s%s.log",g_exedir,n); snprintf(q,sizeof q,"%s%s.previous.log",g_exedir,n); remove(q); rename(p,q);
+      /* keep the last runs' logs (a crash report needs them; the player restarts the game to send it): .previous.log,
+         then .previous2.log .. .previous4.log, so a test run does not push out the one a problem happened in */
+      { char a[1220], b[1220]; snprintf(a,sizeof a,"%s%s.previous4.log",g_exedir,n); remove(a);
+        for(int k=3;k>=1;k--){ if(k==1) snprintf(a,sizeof a,"%s%s.previous.log",g_exedir,n); else snprintf(a,sizeof a,"%s%s.previous%d.log",g_exedir,n,k);
+          snprintf(b,sizeof b,"%s%s.previous%d.log",g_exedir,n,k+1); rename(a,b); } }
+      snprintf(p,sizeof p,"%s%s.log",g_exedir,n); snprintf(q,sizeof q,"%s%s.previous.log",g_exedir,n); rename(p,q);
       g_logf=fopen(p,"w"); }
     if(g_logf) fwrite(q+at,1,L,g_logf);
     if(h>>31){ fwrite(q+at+pre,1,L-pre,stderr);

@@ -278,7 +278,8 @@ void dma_method(GpuChannel* ch, u32 m, u32 v){
       src_linear?"lin":"bl",dst_linear?"lin":"bl",(unsigned long long)src,(unsigned long long)dst,pitch_in,pitch_out,line_len,lines,multi,remap,r[0x1C2],dbh,dw,dh,r[0x1C6],r[0x1C7],r[0x1C8],sbh,sw,sh,r[0x1CF],v); } }
   extern int g_gl; extern void gpu_gl_rt_flush(u64); extern void gpu_gl_rt_reload(u64); extern void gpu_gl_trace(const char*);
   if(g_gl){ char tb[256]; snprintf(tb,sizeof tb,"DMA %s %llx -> %s %llx len=%u lines=%u remap=%d\n",src_linear?"lin":"bl",(unsigned long long)src,dst_linear?"lin":"bl",(unsigned long long)dst,line_len,lines,remap); gpu_gl_trace(tb);
-    gpu_gl_rt_flush(src); gpu_gl_rt_flush(dst); }
+    { extern u64 plat_ns(void); u64 t0=plat_ns(); extern void gpu_gl_rt_flush_read(u64); if(src!=dst) gpu_gl_rt_flush_read(src); else gpu_gl_rt_flush(src); u64 t1=plat_ns(); gpu_gl_rt_flush(dst); u64 t2=plat_ns();
+      if(t2-t0>10000000ull){ static int said; if(said<30){ said++; LOG("dma: flush src %.1f ms dst %.1f ms (%s %llx -> %s %llx, len %u lines %u, src %ux%u)\n",(t1-t0)/1e6,(t2-t1)/1e6,src_linear?"lin":"bl",(unsigned long long)src,dst_linear?"lin":"bl",(unsigned long long)dst,line_len,lines,sw,sh); } } } }
   u8* dpp=NULL; u8* spp=NULL; u64 dspan=0, sspan=0; (void)spp; (void)sspan;
   if(remap && (r[0x1C2]&7)==4 && dst_linear){
     /* DST_X = CONST_A: a buffer fill with the constant in 0x1C0, the source isn't read */
@@ -319,7 +320,7 @@ void dma_method(GpuChannel* ch, u32 m, u32 v){
     for(u32 y=0;y<lines;y++) for(u32 x=0;x<line_len;){ u32 xs=sx*(remap?bpp:1)+x, xd=dx*(remap?bpp:1)+x, n=16-(xs&15), m=16-(xd&15); if(m<n) n=m; if(n>line_len-x) n=line_len-x;
       u8 b[16]; gmem_read(src+bl_offset(xs,sy+y,sz_,swb,sh,sbh,sbd),b,n); gmem_write(dst+bl_offset(xd,dy+y,dz,dwb,dh,dbh,dbd),b,n); x+=n; }
   }
-  if(g_gl) gpu_gl_rt_reload(dst);
+  { extern u64 plat_ns(void); u64 t0=plat_ns(); if(g_gl) gpu_gl_rt_reload(dst); u64 dt=plat_ns()-t0; if(dt>10000000ull){ static int said; if(said<30){ said++; LOG("dma: reload of %llx took %.1f ms\n",(unsigned long long)dst,dt/1e6); } } }
   /* completion semaphore */
   u32 sem=(v>>3)&3;
   if(sem){ u64 sa=((u64)r[0x90]<<32)|r[0x91]; if(sem==1 || sem==2) gmem_w32(sa,r[0x92]); if(sem==2){ u64 t=gpu_ticks(); gmem_w64(sa+8,t); } }

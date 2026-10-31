@@ -1,6 +1,6 @@
 #!/bin/bash
 # Linux build: boot the test folder for N seconds (default 150), then a screenshot. Runs on the real GPU;
-# SWR_SOFTGL=1 uses Mesa's software OpenGL instead. Log: linux/test/game/Metroid Dread.log
+# SWR_SOFTGL=1 uses Mesa's software OpenGL instead. Log: linux/test/game/Metroid Prime 4 Beyond.log
 source "$(dirname "$(readlink -f "$0")")/env.sh"
 bash "$W/linux/make_test_game.sh" > /dev/null || exit 1
 G="$TEST/game"

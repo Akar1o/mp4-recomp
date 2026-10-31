@@ -137,6 +137,11 @@ void video_init(const char* title){
   XInitThreads();
   /* let Mesa run its own glthread so driver work isn't on our GPU thread (Deck, AMD/Intel on Linux) */
   if(!getenv("SWR_NO_GLTHREAD")) setenv("mesa_glthread","true",0);
+  /* the drivers' own shader caches sit under our program binaries: a translated shader the game changes slightly still
+     reuses the driver's compiled pieces. Their defaults are small for a game this size (Mesa 1 GB, NVIDIA 128 MB and
+     cleaned up), and a full cache throws away what it compiled. A value already in the environment wins */
+  setenv("MESA_SHADER_CACHE_MAX_SIZE","8G",0); setenv("MESA_DISK_CACHE_MULTI_FILE","1",0);
+  setenv("__GL_SHADER_DISK_CACHE","1",0); setenv("__GL_SHADER_DISK_CACHE_SIZE","8589934592",0); setenv("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP","1",0);
   dpy=XOpenDisplay(NULL); if(!dpy) fatal("No X11 display (DISPLAY is not set). Start the game from a desktop session.");
   int scr=DefaultScreen(dpy);
   static int att[]={GLX_X_RENDERABLE,True,GLX_DRAWABLE_TYPE,GLX_WINDOW_BIT,GLX_RENDER_TYPE,GLX_RGBA_BIT,GLX_RED_SIZE,8,GLX_GREEN_SIZE,8,GLX_BLUE_SIZE,8,GLX_ALPHA_SIZE,8,GLX_DEPTH_SIZE,24,GLX_DOUBLEBUFFER,True,None};
@@ -162,7 +167,10 @@ void video_init(const char* title){
   extern void gpu_gl_start(void); gpu_gl_start();
 }
 /* GPU thread */
-static GLXContext ctx, wctx; static GLXFBConfig wfc;
+static GLXContext ctx, wctx[8]; static GLXFBConfig wfc; static int g_nwctx; static volatile int g_wnext;
+/* shader compile threads (gpu_gl.c worker_start): Mesa and NVIDIA compile GLSL on the thread that asks, so each thread
+   gets its own context in the game's share group and several shaders build at once. [Performance] shader_threads */
+int g_opt_shader_threads;
 
 static int xerr_ignore(Display* d, XErrorEvent* e){ (void)d;(void)e; return 0; }
 
@@ -175,7 +183,10 @@ int backend_gl_create(void){
   static const int vers[4][2]={{4,6},{4,5},{4,4},{4,3}};
   int (*old)(Display*,XErrorEvent*)=XSetErrorHandler(xerr_ignore);
   for(int i=0;i<4 && !ctx && cca;i++){ int ca[]={0x2091,vers[i][0],0x2092,vers[i][1],0x9126,0x00000001,None}; ctx=cca(dpy,fc[0],NULL,True,ca); XSync(dpy,False);
-    if(ctx){ wctx=cca(dpy,fc[0],ctx,True,ca); XSync(dpy,False); } }
+    if(ctx){ long nc=sysconf(_SC_NPROCESSORS_ONLN); int want=g_opt_shader_threads>0? g_opt_shader_threads : (int)(nc/4);
+      if(want<2 && g_opt_shader_threads<=0) want=2; if(want>8) want=8;
+      for(g_nwctx=0;g_nwctx<want;g_nwctx++){ wctx[g_nwctx]=cca(dpy,fc[0],ctx,True,ca); XSync(dpy,False); if(!wctx[g_nwctx]) break; }
+      { extern int g_gl_workers; g_gl_workers= g_nwctx? g_nwctx : 1; } } }
   wfc=fc[0];
   XSetErrorHandler(old);
   if(!ctx){ fatal("Your graphics driver does not support OpenGL 4.3.\nPlease update Mesa or your GPU driver."); return 0; }
@@ -188,7 +199,16 @@ int backend_gl_create(void){
 
 void* backend_gl_proc(const char* n){ return (void*)glXGetProcAddressARB((const GLubyte*)n); }
 
-void backend_gl_swap(void){ glXSwapBuffers(dpy,win); }
+void backend_gl_swap(void){ glXSwapBuffers(dpy,win);
+  /* SWR_VIDEO_TIMING=1: what reaches the monitor. The display's refresh counter (GLX_OML_sync_control MSC) after each
+     swap: +1 = a clean new frame, +0 = two swaps within one refresh (a torn or never-seen frame), +2 or more = the
+     previous frame shown again (a stutter). Every 120 swaps */
+  static int timing=-1; static Bool (*gsv)(Display*,GLXDrawable,int64_t*,int64_t*,int64_t*); static int64_t last_msc; static u32 n, h[4];
+  if(timing<0){ timing=!getenv("SWR_NO_VIDEO_TIMING"); if(timing) gsv=(Bool(*)(Display*,GLXDrawable,int64_t*,int64_t*,int64_t*))glXGetProcAddressARB((const GLubyte*)"glXGetSyncValuesOML");
+    if(timing && !gsv) LOG("display timing: GLX_OML_sync_control not available\n"); }
+  if(timing && gsv){ int64_t ust=0,msc=0,sbc=0; if(gsv(dpy,win,&ust,&msc,&sbc)){ if(last_msc){ int64_t d=msc-last_msc; h[d<=0? 0 : d==1? 1 : d==2? 2 : 3]++;
+        if(++n==120){ LOG("display timing: of 120 swaps %u clean, %u in the same refresh (torn/unseen), %u repeated once, %u repeated more\n",h[1],h[0],h[2],h[3]); n=0; h[0]=h[1]=h[2]=h[3]=0; } }
+      last_msc=msc; } } }
 /* forced_vsync applies live (glq.c, the GL thread) */
 void backend_gl_vsync(int on){
   typedef void (*SIE)(Display*,GLXDrawable,int); typedef int (*SIM)(unsigned);
@@ -202,10 +222,10 @@ int backend_is_fullscreen(void){ return g_fullscreen; }
 void backend_release_keys(void){}
 
 int backend_gl_worker_current(void){
-  if(!wctx) return 0; int pa[]={GLX_PBUFFER_WIDTH,4,GLX_PBUFFER_HEIGHT,4,None};
+  int k=__atomic_fetch_add(&g_wnext,1,__ATOMIC_ACQ_REL); if(k>=g_nwctx) return 0; int pa[]={GLX_PBUFFER_WIDTH,4,GLX_PBUFFER_HEIGHT,4,None};
   int (*old)(Display*,XErrorEvent*)=XSetErrorHandler(xerr_ignore); GLXPbuffer pb=glXCreatePbuffer(dpy,wfc,pa); XSync(dpy,False); XSetErrorHandler(old);
-  if(pb && glXMakeContextCurrent(dpy,pb,pb,wctx)) return 1;
-  return glXMakeContextCurrent(dpy,None,None,wctx)? 1 : 0; }
+  if(pb && glXMakeContextCurrent(dpy,pb,pb,wctx[k])) return 1;
+  return glXMakeContextCurrent(dpy,None,None,wctx[k])? 1 : 0; }
 
 void backend_window_size(int* w, int* h){ *w=g_ww; *h=g_wh; }
 
@@ -231,7 +251,7 @@ static int key_once(KeySym k, int down){
   for(i=0;i<8;i++) if(!held[i]){ held[i]=k; break; }
   return 1; }
 
-/* the in-game menu (dread_ui/ov.cpp): F1 toggles it; while it is open it takes the keyboard and the mouse */
+/* the in-game menu (beyond_ui/ov.cpp): F1 toggles it; while it is open it takes the keyboard and the mouse */
 extern void ov_input_toggle(void); extern void ov_input_key(int ovk, int down); extern void ov_input_char(unsigned c);
 extern void ov_input_mouse(float x, float y); extern void ov_input_button(int b, int down); extern void ov_input_wheel(float dy);
 extern int ov_is_open(void); extern int ov_pad(unsigned long long phys, int lx, int ly);
@@ -343,7 +363,7 @@ void frontend_frame(void){
 
 int backend_glq_ok(void){ return 1; }   /* GL calls go through glq */
 
-/* Play screen / first-run setup (dread_ui/fe.cpp, in its own window) before the game starts (main.c). 0 = go on with the
+/* Play screen / first-run setup (beyond_ui/fe.cpp, in its own window) before the game starts (main.c). 0 = go on with the
    game, 1 = quit. Skipped for test runs and --no-launcher, as backend_win32.c does; builds without it link stub_fe.c */
 extern int fe_should_show(int argc, char** argv, const char* exedir, const char* exename); extern int fe_run(void* hwnd);
 int backend_frontend(int argc, char** argv, const char* exedir, const char* exename){

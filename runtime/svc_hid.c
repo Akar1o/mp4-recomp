@@ -37,6 +37,7 @@ static void npad_setup(u8* base, int idx, u32 style, u32 devtype){
   u8 ftype= idx==8? 4 : 3; e[HO_HidNpadInternalState_applet_footer_ui_type]=ftype;   /* handheld / pro controller */
 }
 
+u64 g_pad_buttons_now;   /* cheats.c: keypress codes */
 void hid_update(void){
   if(!g_hid_shm) return;
   u8* b=kshmem_ptr(g_hid_shm);
@@ -47,7 +48,7 @@ void hid_update(void){
   if(g_pad.lx<-16000) btn|=1ull<<16; if(g_pad.ly>16000) btn|=1ull<<17; if(g_pad.lx>16000) btn|=1ull<<18; if(g_pad.ly<-16000) btn|=1ull<<19;
   if(g_pad.rx<-16000) btn|=1ull<<20; if(g_pad.ry>16000) btn|=1ull<<21; if(g_pad.rx>16000) btn|=1ull<<22; if(g_pad.ry<-16000) btn|=1ull<<23;
   memcpy(st+HO_HidNpadCommonState_sampling_number,&g_samp,8);
-  memcpy(st+HO_HidNpadCommonState_buttons,&btn,8);
+  memcpy(st+HO_HidNpadCommonState_buttons,&btn,8); g_pad_buttons_now=btn;
   i32 s4[4]={g_pad.lx,g_pad.ly,g_pad.rx,g_pad.ry}; memcpy(st+HO_HidNpadCommonState_analog_stick_l,s4,16);
   u32 attr=1; memcpy(st+HO_HidNpadCommonState_attributes,&attr,4);   /* IsConnected */
   /* No1 = pro / dual joycon, Handheld = attached */
@@ -85,6 +86,7 @@ void hid_update(void){
   lifo_push(b+HO_HidSharedMemory_mouse,8+HS_HidMouseState,ms,sizeof ms,g_samp);
   u8 dp[HS_HidDebugPadState]; memset(dp,0,sizeof dp); memcpy(dp,&g_samp,8);
   lifo_push(b+HO_HidSharedMemory_debug_pad,8+HS_HidDebugPadState,dp,sizeof dp,g_samp);
+  { extern void cheats_tick(void); cheats_tick(); }   /* cheat codes and the FOV hook, once per update like dmnt */
 }
 
 static int hid_applet_res(SvcObj* o, IpcCtx* c){
@@ -121,7 +123,14 @@ static int hid_disp(SvcObj* o, IpcCtx* c){
     case 68: case 82: out8(c,1); return 0;                                         /* IsSixAxisSensorFusionEnabled / AtRest */
     case 69: case 70: case 71: case 72: case 73: case 74: case 75: case 76: case 77: case 78: case 79: case 80: case 81: case 83: case 84: case 85: case 86: case 87: case 88: case 89:
       if(c->cmd==71||c->cmd==73||c->cmd==79||c->cmd==84||c->cmd==86||c->cmd==88){ out32(c,0); out32(c,0); } return 0;
-    case 100: g_style_supported=in32(c,0); return 0;                               /* SetSupportedNpadStyleSet */
+    case 100: { g_style_supported=in32(c,0);                                         /* SetSupportedNpadStyleSet */
+      /* player 1 reports one style, like a real controller: FullKey (Pro Controller) when the game takes it, else JoyDual.
+         Reporting both made Metroid Prime 4 read player 1 as JoyDual, a style it had no six-axis handles for (an all-zero
+         handle, then an abort in nn::hid::detail::GetSixAxisSensorStates) */
+      u32 st= (g_style_supported&1u)? 1u : (g_style_supported&4u)? 4u : (1u<<0)|(1u<<2);
+      u32 dev= st==1u? 1u<<0 : (1u<<0)|(1u<<5);
+      if(g_hid_shm){ npad_setup(kshmem_ptr(g_hid_shm),0,st,dev); if(g_style_ev[0]) kevent_signal(g_style_ev[0]); }
+      return 0; }
     case 101: out32(c,g_style_supported); return 0;
     case 106: { u32 id=in32(c,0); int i= id==0x20? 8 : id==0x10? 9 : (int)(id&7);
       if(!g_style_ev[i]){ g_style_ev[i]=kevent_new("npad style",0); kobj_ref(&g_style_ev[i]->o); kevent_signal(g_style_ev[i]); }

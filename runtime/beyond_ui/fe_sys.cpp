@@ -53,7 +53,7 @@ void Paths::init(const char* dir, const char* name) {
     exe = join(exedir, exename + ".exe"); ini = join(exedir, exename + ".ini"); data = join(exedir, exename + "_data");
     code = join(exedir, exename + "_code.dll"); build = join(exedir, exename + "_build"); recompiler = join(exedir, "recompiler");
     setup_ok = join(data, "setup.ok");
-    wchar_t* ad = nullptr; if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &ad) == S_OK) { appdata = join(utf8(ad), "MetroidDreadRecomp"); CoTaskMemFree(ad); }
+    wchar_t* ad = nullptr; if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &ad) == S_OK) { appdata = join(utf8(ad), "MetroidBeyondRecomp"); CoTaskMemFree(ad); }
 }
 
 // ---------------------------------------------------------------- INI
@@ -150,7 +150,8 @@ GameCheck check_installed() {
     GameCheck g;
     g.code_ok = file_exists(P.code) && file_size(P.code) > 50 * 1024 * 1024;
     g.exefs_ok = file_exists(join(P.data, "exefs\\main")) && file_exists(join(P.data, "exefs\\main.npdm"));
-    g.romfs_ok = dir_exists(join(P.data, "romfs\\system")) && dir_exists(join(P.data, "romfs\\packs"));
+    // Metroid Prime 4's RomFS: Worlds/ plus Kernel.pak (Dread checked system/ and packs/, which this game does not have)
+    g.romfs_ok = dir_exists(join(P.data, "romfs\\Worlds")) && file_exists(join(P.data, "romfs\\Kernel.pak"));
     g.data_ok = g.exefs_ok && g.romfs_ok;
     g.setup_ok = file_exists(P.setup_ok);
     if (!g.code_ok) g.summary = "The game has not been compiled yet.";
@@ -196,8 +197,8 @@ static DWORD WINAPI reader(void* p) {
 }
 
 bool setup_start(SetupJob& j) {
-    std::string py = recompiler_python(), script = join(P.recompiler, "dread_setup.py");
-    if (!file_exists(py) || !file_exists(script)) { j.failed = true; j.error = "The recompiler is missing: expected " + P.recompiler + " (python\\python.exe and dread_setup.py). Re-extract the release."; return false; }
+    std::string py = recompiler_python(), script = join(P.recompiler, "beyond_setup.py");
+    if (!file_exists(py) || !file_exists(script)) { j.failed = true; j.error = "The recompiler is missing: expected " + P.recompiler + " (python\\python.exe and beyond_setup.py). Re-extract the release."; return false; }
     // command-line quoting: a backslash before the closing quote must be doubled ("C:\dir\\")
     auto q = [](const std::string& v) { std::wstring w = wide(v); size_t n = 0; while (n < w.size() && w[w.size() - 1 - n] == L'\\') n++; w.append(n, L'\\'); return L"\"" + w + L"\""; };
     std::wstring cmd = q(py) + L" -I -u " + q(script) + L" --out " + q(P.exedir) + L" --name " + q(P.exename) + L" --base " + q(j.base);
@@ -327,7 +328,7 @@ bool backup_saves(std::string* out, std::string* err) {
     if (dir_size(src) != before) { if (err) *err = "Saves changed during the backup. Close the game and try again."; return false; }
     std::string z = stored_zip(es);
     make_dirs(backups_dir());
-    std::string path = join(backups_dir(), "Metroid-Dread-saves-" + now_stamp() + ".zip");
+    std::string path = join(backups_dir(), "Metroid-Beyond-saves-" + now_stamp() + ".zip");
     if (!write_text(path, z)) { if (err) *err = "Could not write " + path; return false; }
     std::string back = read_text(path);   // verify: same bytes, every entry's CRC still matches
     if (back != z) { if (err) *err = "Backup verification failed."; DeleteFileW(wide(path).c_str()); return false; }
@@ -349,7 +350,7 @@ bool make_report(const std::string& info, std::string* out, std::string* err) {
     for (auto& f : files) { std::string p = join(P.exedir, f); if (!file_exists(p)) continue; ZipEntry e; e.name = f; e.data = read_text(p); es.push_back(e); }
     if (es.size() < 2) { if (err) *err = "There are no logs yet. Start the game once, then try again."; return false; }
     make_dirs(reports_dir());
-    std::string path = join(reports_dir(), "Metroid-Dread-report-" + now_stamp() + ".zip");
+    std::string path = join(reports_dir(), "Metroid-Beyond-report-" + now_stamp() + ".zip");
     if (!write_text(path, stored_zip(es))) { if (err) *err = "Could not write " + path; return false; }
     if (out) *out = path; return true;
 }
@@ -377,13 +378,13 @@ void mods_write(const std::vector<Mod>& m) {
     write_text(join(mods_dir(), "load_order.txt"), s);
 }
 static std::string find_romfs(const std::string& root) {
-    const char* id = "010093801237C000";
+    const char* id = "010019A01E2F2000";
     std::string c[] = {join(root, "romfs"), join(root, std::string("atmosphere\\contents\\") + id + "\\romfs"), join(root, std::string("atmosphere\\titles\\") + id + "\\romfs"),
                        join(root, std::string("contents\\") + id + "\\romfs"), join(root, std::string(id) + "\\romfs")};
     for (auto& x : c) if (dir_exists(x)) return x;
     std::string found; walk(root, "", [&](const std::string& r, bool dir, long long) { if (found.empty() && dir) { size_t s = r.find_last_of('\\'); std::string leaf = s == std::string::npos ? r : r.substr(s + 1); if (leaf == "romfs") found = join(root, r); } });
     if (!found.empty()) return found;
-    for (const char* d : {"packs", "textures", "system", "gui", "sounds", "actors"}) if (dir_exists(join(root, d))) return root;
+    for (const char* d : {"Worlds", "UI", "Preload", "Patch"}) if (dir_exists(join(root, d))) return root;
     return {};
 }
 bool mod_import_folder(const std::string& src, const std::string& name, std::string* err) {
@@ -395,7 +396,7 @@ bool mod_import_folder(const std::string& src, const std::string& name, std::str
 }
 bool mod_import_zip(const std::string& zip, std::string* err) {
     wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
-    std::string dir = join(utf8(tmp), "dreadmod_" + now_stamp()); make_dirs(dir);
+    std::string dir = join(utf8(tmp), "beyondmod_" + now_stamp()); make_dirs(dir);
     wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH);
     std::wstring cmd = L"\"" + std::wstring(sys) + L"\\tar.exe\" -xf \"" + wide(zip) + L"\" -C \"" + wide(dir) + L"\"";   // Windows' bsdtar: refuses paths that leave -C
     STARTUPINFOW si = {sizeof si}; PROCESS_INFORMATION pi; std::vector<wchar_t> c(cmd.begin(), cmd.end()); c.push_back(0);
@@ -417,7 +418,7 @@ const IconPack ICON_PACKS[3] = {
 bool icon_pack_installed(int i) { return dir_exists(join(join(mods_dir(), ICON_PACKS[i].name), "romfs")); }
 bool icon_pack_get(int i, std::string* err) {
     wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
-    std::string dir = join(utf8(tmp), "dreadicons_" + now_stamp()); make_dirs(dir);
+    std::string dir = join(utf8(tmp), "beyondicons_" + now_stamp()); make_dirs(dir);
     std::string arc = join(dir, "pack.bin");
     if (URLDownloadToFileW(nullptr, wide(ICON_PACKS[i].url).c_str(), wide(arc).c_str(), 0, nullptr) != S_OK) {
         if (err) *err = "Download failed: check the internet connection."; recycle(dir); return false; }

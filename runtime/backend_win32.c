@@ -3,7 +3,7 @@
    any copy or derived work must keep the credit to SwitchRecomp by MZ Labs. */
 /* win32 backend: window, WGL, keyboard, XInput.
    F1 menu  F3 screenshot  F4 fps limit  F11 fullscreen  Esc quit
-   The same window first shows the Play screen / setup (dread_ui/fe.cpp, Direct3D 11, no pixel format), then the game. */
+   The same window first shows the Play screen / setup (beyond_ui/fe.cpp, Direct3D 11, no pixel format), then the game. */
 #include "rt.h"
 #include <math.h>
 #include <ctype.h>
@@ -45,7 +45,7 @@ static void backend_status_win(const char* s){ if(!g_hwnd) return; char* c=NULL;
 void backend_ff_status(int on, int speed){ if(g_hwnd) PostMessageA(g_hwnd,WM_APP+9,(WPARAM)on,(LPARAM)speed); }
 int video_has_gl(void){ return 1; }
 
-void win_fatal_box(const char* msg){ MessageBoxA(g_hwnd,msg,"Metroid Dread",MB_OK|MB_ICONERROR); }
+void win_fatal_box(const char* msg){ MessageBoxA(g_hwnd,msg,"Metroid Prime 4 Beyond",MB_OK|MB_ICONERROR); }
 
 /* ---------------------------------------------------------------- XInput, loaded dynamically */
 typedef struct { WORD wButtons; BYTE bLeftTrigger, bRightTrigger; SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; } XGP;
@@ -202,7 +202,7 @@ volatile int g_rec_toggle;
 
 void backend_rec_state(int on){ if(g_hwnd) PostMessageA(g_hwnd,WM_APP+8,(WPARAM)on,0); }
 static const char* HELP=
-  "Metroid Dread - controls\n\n"
+  "Metroid Prime 4 Beyond - controls\n\n"
   "XInput (Xbox) controller: same as the Switch controller (A/B swapped by position).\n\n"
   "Keyboard:\n"
   "  Arrows = D-Pad     W A S D = Left stick    I J K L = Right stick\n"
@@ -223,8 +223,8 @@ static u64 keymap(WPARAM k){
     case 'J': return 1ull<<44; case 'I': return 1ull<<45; case 'L': return 1ull<<46; case 'K': return 1ull<<47; }
   return 0; }
 
-extern int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l, long long* result);   /* dread_ui/fe.cpp */
-extern int ov_wndproc(void* h, unsigned m, unsigned long long w, long long l);   /* dread_ui/ov.cpp: 1 = the menu took it */
+extern int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l, long long* result);   /* beyond_ui/fe.cpp */
+extern int ov_wndproc(void* h, unsigned m, unsigned long long w, long long l);   /* beyond_ui/ov.cpp: 1 = the menu took it */
 extern int ov_is_open(void);
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
   if(h==g_fe_hwnd) return DefWindowProcA(h,m,w,l);
@@ -247,7 +247,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
     if(w==VK_ESCAPE){ g_quit=1; return 0; }
     if(w==VK_F11){ set_fullscreen(!g_fullscreen); return 0; }
     if(w==VK_F1){ return 0; }   /* the in-game menu (ov_wndproc) */
-    if(0){ MessageBoxA(h,HELP,"Metroid Dread",MB_OK); }
+    if(0){ MessageBoxA(h,HELP,"Metroid Prime 4 Beyond",MB_OK); }
     if(w==VK_F3){ g_shot_req=1; return 0; }
     if(w==VK_F7){ g_rec_toggle=1; return 0; }
     if(w==VK_TAB){ if(!(l & (1L<<30))){ extern volatile int g_ff_presses; g_ff_presses++; } return 0; }   /* fast forward toggle (fast_forward=1) */
@@ -294,15 +294,15 @@ static void set_pixel_format(HDC dc){
   SetPixelFormat(dc,ChoosePixelFormat(dc,&pfd),&pfd); }
 
 /* window + message pump on their own thread so nothing stalls them */
-extern int fe_run(void* hwnd);   /* dread_ui/fe.cpp: its own message loop; 0 = play, 1 = quit */
+extern int fe_run(void* hwnd);   /* beyond_ui/fe.cpp: its own message loop; 0 = play, 1 = quit */
 static void win_thread(void* arg){
   HINSTANCE hi=GetModuleHandle(NULL);
   WNDCLASSA wc={0}; wc.style=CS_OWNDC; wc.lpfnWndProc=wndproc; wc.hInstance=hi; wc.hCursor=LoadCursor(NULL,IDC_ARROW);
   wc.hIcon=LoadIcon(hi,MAKEINTRESOURCE(1)); if(!wc.hIcon) wc.hIcon=LoadIcon(NULL,IDI_APPLICATION);
-  wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); wc.lpszClassName="MetroidDreadWnd";
+  wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); wc.lpszClassName="MetroidBeyondWnd";
   RegisterClassA(&wc);
   RECT r={0,0,1280,720}; AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);
-  g_hwnd=CreateWindowA("MetroidDreadWnd",g_title,WS_OVERLAPPEDWINDOW|(arg? 0 : WS_VISIBLE),CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL);
+  g_hwnd=CreateWindowA("MetroidBeyondWnd",g_title,WS_OVERLAPPEDWINDOW|(arg? 0 : WS_VISIBLE),CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL);
   if(arg){   /* front end first, in this window; the game continues in it after Play */
     g_fe_mode=1; g_fe_result=fe_run(g_hwnd); g_fe_mode=0;
     if(g_fe_result){ SetEvent(g_fe_done); return; }   /* the process ends */
@@ -314,7 +314,7 @@ static void win_thread(void* arg){
          same place, size and fullscreen state; the front end's goes. g_wp keeps the windowed placement for F11 */
       HWND old=g_hwnd; int fs=g_fullscreen; WINDOWPLACEMENT wp={sizeof wp};
       if(fs) wp=g_wp; else GetWindowPlacement(old,&wp);   /* fullscreen: the windowed placement it was entered from */
-      HWND nw=CreateWindowA("MetroidDreadWnd",g_title,WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,720,NULL,NULL,hi,NULL);
+      HWND nw=CreateWindowA("MetroidBeyondWnd",g_title,WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,720,NULL,NULL,hi,NULL);
       if(nw){ g_fe_hwnd=old; g_hwnd=nw;
         if(fs){ wp.showCmd=SW_HIDE; SetWindowPlacement(nw,&wp); g_fullscreen=0; ShowCursor(TRUE); set_fullscreen(1); }   /* as F11 does: borderless over the monitor, g_wp saved */
         else SetWindowPlacement(nw,&wp);   /* normal or maximized, as the player left it */
@@ -327,8 +327,8 @@ static void win_thread(void* arg){
     if(!g_want_fs && g_fullscreen) set_fullscreen(0); }
   /* a window with a GL pixel format can't take a Vulkan swapchain reliably: with renderer=vulkan the GL
      context lives on a hidden window and the visible one is left to Vulkan */
-  if(g_want_vk){ WNDCLASSA gc={0}; gc.style=CS_OWNDC; gc.lpfnWndProc=DefWindowProcA; gc.hInstance=hi; gc.lpszClassName="MetroidDreadGL";   /* own class: its size must not reach wndproc */
-    RegisterClassA(&gc); g_glwnd=CreateWindowA("MetroidDreadGL","Metroid Dread GL",WS_POPUP,0,0,64,64,NULL,NULL,hi,NULL); }
+  if(g_want_vk){ WNDCLASSA gc={0}; gc.style=CS_OWNDC; gc.lpfnWndProc=DefWindowProcA; gc.hInstance=hi; gc.lpszClassName="MetroidBeyondGL";   /* own class: its size must not reach wndproc */
+    RegisterClassA(&gc); g_glwnd=CreateWindowA("MetroidBeyondGL","Metroid Prime 4 Beyond GL",WS_POPUP,0,0,64,64,NULL,NULL,hi,NULL); }
   g_hdc=GetDC(g_glwnd? g_glwnd : g_hwnd);
   { extern int g_snxvk_want; if(!g_snxvk_want) set_pixel_format(g_hdc); }   /* native Vulkan: no GL pixel format on its window (set later if it falls back) */
   if(g_want_fs) set_fullscreen(1);
@@ -360,12 +360,12 @@ void video_init(const char* title){
 
 /* Play screen / first-run setup before the game starts (main.c). 0 = go on with the game, 1 = quit.
    Skipped for test runs (replays, exit frame, --no-launcher) and when the front end decides to (skip_launcher=1, --play). */
-extern int fe_should_show(int argc, char** argv, const char* exedir, const char* exename);   /* dread_ui/fe.cpp */
+extern int fe_should_show(int argc, char** argv, const char* exedir, const char* exename);   /* beyond_ui/fe.cpp */
 int backend_frontend(int argc, char** argv, const char* exedir, const char* exename){
   if(!getenv("SWR_FE_TEST") && (getenv("SWR_TEST_SCRIPT") || getenv("SWR_TEST_EXIT_FRAME") || getenv("SWR_TEST_RECORD"))) return 0;   /* SWR_FE_TEST: front-end tests */
   for(int i=1;i<argc;i++) if(!strcmp(argv[i],"--no-launcher")) return 0;
   if(!fe_should_show(argc,argv,exedir,exename)) return 0;
-  snprintf(g_title,sizeof g_title,"Metroid Dread");
+  snprintf(g_title,sizeof g_title,"Metroid Prime 4 Beyond");
   g_ready=CreateEventA(NULL,TRUE,FALSE,NULL); g_fe_done=CreateEventA(NULL,TRUE,FALSE,NULL); g_video_go=CreateEventA(NULL,TRUE,FALSE,NULL);
   g_win_started=1; _beginthread(win_thread,1<<20,(void*)1);
   WaitForSingleObject(g_fe_done,INFINITE);
@@ -535,7 +535,7 @@ void video_poll(void){
     while(*p){ u64 t=strtoull(p,(char**)&p,10); if(*p!=':') break; p++; u64 m=strtoull(p,(char**)&p,16); if(el>=t && el<t+300){ b|=m; if(m&(1ull<<16))lx=-32767; if(m&(1ull<<18))lx=32767; if(m&(1ull<<17))ly=32767; if(m&(1ull<<19))ly=-32767; if(m&(1ull<<20))rx=-32767; if(m&(1ull<<22))rx=32767; if(m&(1ull<<21))ry=32767; if(m&(1ull<<23))ry=-32767; } if(*p==',') p++; } }
   test_input_apply(&b,&lx,&ly,&rx,&ry);
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
-  { extern int ov_pad(unsigned long long phys, int lx, int ly);   /* dread_ui/ov.cpp: 1 = the menu has the controller */
+  { extern int ov_pad(unsigned long long phys, int lx, int ly);   /* beyond_ui/ov.cpp: 1 = the menu has the controller */
     if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; } }
   if(!ov_is_open()) mouse_apply(&b,&lx,&ly);   /* the menu uses the mouse itself while open */
   { /* rumble (svc_hid.c hid_rumble_get) to the pads input comes from: on a change, else refreshed every 100 ms

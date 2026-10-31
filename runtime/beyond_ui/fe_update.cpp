@@ -22,8 +22,9 @@
 
 namespace fe {
 
-static const wchar_t* UA = L"MetroidDreadRecomp-updater";
-static const char* REPO = "yozander2009-stack/Metroid-Dread-Recomp";
+static const wchar_t* UA = L"MetroidBeyondRecomp-updater";
+/* this fork's GitHub repository (owner/name): updates and bug reports point here. SWR_UPDATE_REPO overrides it */
+static const char* REPO = getenv("SWR_UPDATE_REPO") ? getenv("SWR_UPDATE_REPO") : BEYOND_REPO;
 
 struct ManFile { std::string sha, path; long long size = 0; };
 struct Manifest { std::string version, tag, pkg, pkg_sha; long long pkg_size = 0; std::vector<ManFile> files; bool ok = false; };

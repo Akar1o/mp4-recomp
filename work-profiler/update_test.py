@@ -1,4 +1,4 @@
-"""In-place update test (runtime/dread_ui/fe_update.cpp): serves a release folder made by make_release.py on
+"""In-place update test (runtime/beyond_ui/fe_update.cpp): serves a release folder made by make_release.py on
 127.0.0.1 and starts an installed game's EXE with the front end's test hooks, which press UPDATE / REBUILD / RESTART.
 
   update_test.py INSTALL_DIR SERVED_RELEASE_DIR RESULT_FILE [seconds]
@@ -18,13 +18,13 @@ env = dict(os.environ, SWR_FE_TEST='1', SWR_FE_AUTOUPDATE='1', SWR_FE_RESULT=res
            SWR_UPDATE_URL='http://127.0.0.1:%d' % port)
 if os.path.exists(result):
     os.remove(result)
-exe = os.path.join(inst, 'Metroid Dread.exe')
+exe = os.path.join(inst, 'Metroid Prime 4 Beyond.exe')
 t0 = time.time()
 subprocess.Popen([exe], cwd=inst, env=env)
 # the first process may restart into the new EXE: wait until no game process from this folder is left
 def running():
     out = subprocess.run(['powershell', '-NoProfile', '-Command',
-                          "(Get-Process 'Metroid Dread' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '%s*' }).Count" % inst.replace("'", "''")],
+                          "(Get-Process 'Metroid Prime 4 Beyond' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '%s*' }).Count" % inst.replace("'", "''")],
                          capture_output=True, text=True).stdout.strip()
     return int(out or '0')
 time.sleep(3)

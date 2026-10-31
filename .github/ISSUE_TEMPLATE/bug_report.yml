@@ -79,14 +79,14 @@ body:
     attributes:
       label: Game files
       options:
-        - label: My game files are my own dump of Metroid Dread 2.1.0 (ExeFS and RomFS, update applied)
+        - label: My game files are my own dump of Metroid Prime 4 Beyond 2.1.0 (ExeFS and RomFS, update applied)
           required: true
   - type: textarea
     id: logs
     attributes:
       label: Logs
       description: |
-        Drag in `Metroid Dread.log` from the game folder. For stutter also `performance.txt`; for setup problems
+        Drag in `Metroid Prime 4 Beyond.log` from the game folder. For stutter also `performance.txt`; for setup problems
         `setup.log`. Attach the files rather than pasting them.
     validations:
       required: true

@@ -230,7 +230,7 @@ static GlFmt rt_format(u32 f){
 typedef struct Tex {
   u64 gva; u32 w, h, d, levels, target; u32 fkey; GlFmt f;
   u32 bl, bh, bd, pitch; u64 size;
-  GLuint id; u64 hash; int is_rt, gpu_written; u32 frame_checked, last_used; GLint swz[4]; u64 tr_last; u32 stable, next_check; u64 video_gen; GLuint view; GLenum view_target; GLint vswz[4]; u32 wgen, crop_gen; struct Tex* crop; struct Tex* lay; struct Tex* vol; int skipclr, zero3d; u64 alias; u64 shash; u32 tfull;
+  GLuint id; u64 hash; int is_rt, gpu_written; u32 frame_checked, last_used; GLint swz[4]; u64 tr_last; u32 stable, next_check; u64 video_gen; GLuint view; GLenum view_target; GLint vswz[4]; u32 wgen, crop_gen, nup, agen, apend; int abase; u64 wtick; GLuint rb_pbo; GLsync rb_fence; u32 rb_w, rb_h; const u8* rb_ptr; struct Tex* crop; struct Tex* lay; struct Tex* vol; int skipclr, zero3d; u64 alias; u64 shash; u32 tfull;
   GLuint pre; u32 pre_wgen, pre_w, pre_h; int pre_lv;   /* box-averaged copy for downsampling reads at a high resolution scale */
   struct Tex* next;
 } Tex;
@@ -314,12 +314,82 @@ static void pf_run(PfFn fn, void* ctx, u32 n, u32 min_par){
   pf_work(&j);
   pm_lock(&g_pf.lk); g_pf.job=NULL; while(j.refs) pc_wait(&g_pf.dn,&g_pf.lk,1000000000ll); pm_unlock(&g_pf.lk); }
 typedef struct { u8* lin; const u8* src; u64 lsz; u32 rowb, th, lbh, lbd; } DsJob;
+/* ASTC textures decode in the background. This GPU has no ASTC: the driver decoded them on the GL thread (20-90 ms
+   per texture) and our decoder took as long on the GPU thread, and with Prime 4 streaming textures in as the camera
+   turns every GPU fence the game waited on became a hitch of up to 300 ms. Now the small mip levels (128 px and less)
+   decode at once and the texture shows from those, the large levels decode on a few threads and get uploaded at the
+   next frames (a short blur instead of a stall). SWR_ASTC_SYNC=1 decodes everything at once */
+typedef struct AJob { struct AJob* next; struct AJob* anext; Tex* t; u32 gen, level, w, h, bw, bh; u8* src; u8* dst; int done; } AJob;
+static struct { PMutex lk; PCond cv; AJob* todo; AJob** todo_tail; AJob* all; int init, nth; } g_aj;
+static void aj_thread(void* arg){ (void)arg;
+  for(;;){ pm_lock(&g_aj.lk); while(!g_aj.todo) pc_wait(&g_aj.cv,&g_aj.lk,1000000000ll);
+    AJob* j=g_aj.todo; g_aj.todo=j->next; if(!g_aj.todo) g_aj.todo_tail=&g_aj.todo; pm_unlock(&g_aj.lk);
+    u8* d=malloc((size_t)j->w*j->h*4+64); if(d) astc_decode_image(j->src,j->w,j->h,j->bw,j->bh,d);
+    pm_lock(&g_aj.lk); j->dst=d; j->done=1; pm_unlock(&g_aj.lk); } }
+static int aj_on(void){
+  if(!g_aj.init){ g_aj.init=1; if(getenv("SWR_ASTC_SYNC")) return 0;
+    pm_init(&g_aj.lk); pc_init(&g_aj.cv); g_aj.todo_tail=&g_aj.todo; extern int plat_ncpu(void); int n=plat_ncpu()/2; if(n<2) n=2; if(n>6) n=6;
+    for(int i=0;i<n;i++) if(!plat_thread(aj_thread,NULL,1u<<20)) g_aj.nth++;
+    LOG("textures: ASTC decodes in the background (%d threads)\n",g_aj.nth); }
+  return g_aj.nth>0; }
+static void aj_push(Tex* t, u32 level, u32 w, u32 h, u32 bw, u32 bh, const u8* lin, size_t n){
+  AJob* j=calloc(1,sizeof *j); j->src=malloc(n); if(!j->src){ free(j); return; } memcpy(j->src,lin,n);
+  j->t=t; j->gen=t->agen; j->level=level; j->w=w; j->h=h; j->bw=bw; j->bh=bh; t->apend++;
+  pm_lock(&g_aj.lk); j->anext=g_aj.all; g_aj.all=j; *g_aj.todo_tail=j; g_aj.todo_tail=&j->next; pc_signal(&g_aj.cv); pm_unlock(&g_aj.lk); }
+/* a texture going away or getting new data: its pending levels are dropped */
+static void aj_forget(Tex* t){ if(!g_aj.nth || !t->apend) return;
+  pm_lock(&g_aj.lk); for(AJob* j=g_aj.all;j;j=j->anext) if(j->t==t) j->t=NULL; pm_unlock(&g_aj.lk); t->apend=0; }
+/* GPU thread, once a frame: upload what finished, up to a budget so a burst doesn't become the hitch */
+static void aj_drain(void){
+  if(!g_aj.nth) return; u64 budget=48ull<<20, used=0; AJob* fin=NULL;
+  pm_lock(&g_aj.lk); for(AJob** pp=&g_aj.all;*pp;){ AJob* j=*pp;
+      if(j->done && (!j->t || used<budget)){ *pp=j->anext; j->anext=fin; fin=j; if(j->t) used+=(u64)j->w*j->h*4; } else pp=&j->anext; }
+  pm_unlock(&g_aj.lk);
+  for(AJob* j=fin;j;){ AJob* nx=j->anext; Tex* t=j->t;
+    if(t && j->dst && j->gen==t->agen){ glBindTexture(GL_TEXTURE_2D,t->id); glPixelStorei(GL_UNPACK_ALIGNMENT,1); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+      glTexSubImage2D(GL_TEXTURE_2D,(GLint)j->level,0,0,(GLsizei)j->w,(GLsizei)j->h,GL_RGBA,GL_UNSIGNED_BYTE,j->dst);
+      if(t->apend) t->apend--;
+      /* show the finest level that is in now (levels arrive in any order: base = the largest contiguous run from the bottom) */
+      if(!t->apend) glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);
+      else if(j->level+1==(u32)t->abase){ t->abase=(int)j->level; glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,t->abase); } }
+    free(j->src); free(j->dst); free(j); j=nx; } }
+
 static void ds_rows(void* c, u32 a, u32 b){ DsJob* j=c; deswizzle_rows(j->lin,j->rowb,j->src,j->lsz,j->th,j->lbh,j->lbd,a,b); }
 
 static u64 tex_stage_totals[5];
 static int g_upload_direct=1;   /* SWR_UPLOAD_COPY=1 restores the scratch copy (A/B) */
-static void tex_upload(Tex* t){ st_tex_up+=t->size; u64 upload_start=plat_ns(), upload_read_ns=0, upload_unpack_ns=0, upload_decode_ns=0, upload_driver_ns=0, upload_stage;
+/* Compressed texture uploads go through a persistently mapped ring (8 slots of 8 MB, each guarded by a fence): uploading
+   from client memory made the driver stall the GL thread 20-85 ms per texture while Prime 4 streamed textures in as
+   the camera turned, and every fence wait behind it became a hitch. From a buffer the driver copies on the GPU.
+   Measured slower on radeonsi (whole runs at 25-125 ms frames), so opt-in: SWR_UPLOAD_RING=1 */
+#define UR_SLOTS 8
+#define UR_SLOT (8u<<20)
+static GLuint g_ur2; static u8* g_ur2_ptr; static GLsync g_ur2_f[UR_SLOTS]; static u32 g_ur2_slot, g_ur2_off; static int g_ur2_state;
+static PFNGLBUFFERSTORAGEPROC p_u2bs; static PFNGLMAPBUFFERRANGEPROC p_u2map; static PFNGLFENCESYNCPROC p_u2fs; static PFNGLCLIENTWAITSYNCPROC p_u2cws; static PFNGLDELETESYNCPROC p_u2ds;
+/* room for n bytes, returns the offset or ~0u */
+static u32 ur2_alloc(u32 n){
+  if(g_ur2_state<0 || n>UR_SLOT) return ~0u;
+  if(!g_ur2_state){ g_ur2_state=-1; if(!getenv("SWR_UPLOAD_RING") || g_gles) return ~0u;
+    p_u2bs=(PFNGLBUFFERSTORAGEPROC)backend_gl_proc("glBufferStorage"); p_u2map=(PFNGLMAPBUFFERRANGEPROC)backend_gl_proc("glMapBufferRange");
+    p_u2fs=(PFNGLFENCESYNCPROC)backend_gl_proc("glFenceSync"); p_u2cws=(PFNGLCLIENTWAITSYNCPROC)backend_gl_proc("glClientWaitSync"); p_u2ds=(PFNGLDELETESYNCPROC)backend_gl_proc("glDeleteSync");
+    if(!p_u2bs || !p_u2map || !p_u2fs || !p_u2cws || !p_u2ds) return ~0u;
+    glGenBuffers(1,&g_ur2); glBindBuffer(GL_PIXEL_UNPACK_BUFFER,g_ur2);
+    p_u2bs(GL_PIXEL_UNPACK_BUFFER,(GLsizeiptr)UR_SLOTS*UR_SLOT,NULL,GL_MAP_WRITE_BIT|GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT);
+    g_ur2_ptr=(u8*)p_u2map(GL_PIXEL_UNPACK_BUFFER,0,(GLsizeiptr)UR_SLOTS*UR_SLOT,GL_MAP_WRITE_BIT|GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
+    if(!g_ur2_ptr) return ~0u;
+    g_ur2_state=1; LOG("gpu: compressed textures upload through a %u MB ring\n",(UR_SLOTS*UR_SLOT)>>20); }
+  if(g_ur2_off+n>UR_SLOT){   /* next slot: fence the one we leave, the next must be done */
+    u32 nx=(g_ur2_slot+1)%UR_SLOTS;
+    if(g_ur2_f[nx]){ GLenum r=p_u2cws(g_ur2_f[nx],0,0); if(r!=GL_ALREADY_SIGNALED && r!=GL_CONDITION_SATISFIED) return ~0u; p_u2ds(g_ur2_f[nx]); g_ur2_f[nx]=0; }
+    g_ur2_f[g_ur2_slot]=p_u2fs(GL_SYNC_GPU_COMMANDS_COMPLETE,0); g_ur2_slot=nx; g_ur2_off=0; }
+  u32 o=g_ur2_slot*UR_SLOT+g_ur2_off; g_ur2_off=(g_ur2_off+n+255)&~255u; return o; }
+
+static u64 g_upl_t0;
+static void tex_upload(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t->size; u64 upload_start=plat_ns(), upload_read_ns=0, upload_unpack_ns=0, upload_decode_ns=0, upload_driver_ns=0, upload_stage;
   if(tex_zero_height_fix(t)) return;
+  t->agen++; aj_forget(t); int a_async=0;
+  { static int said; t->nup++; if(said<4000 && getenv("SWR_TRACE_UPLOADS") && plat_ns()-g_upl_t0>(u64)atoi(getenv("SWR_TRACE_UPLOADS"))*1000000000ull){ said++; LOG("texture upload %ux%ux%u levels %u fkey %x %llu KB (upload %u)\n",t->w,t->h,t->d,t->levels,t->fkey,(unsigned long long)t->size>>10,t->nup); } }
   { static int e=-1; if(e<0){ e=getenv("SWR_UPLOAD_COPY")!=NULL; if(e) g_upload_direct=0; } }
   const GlFmt* f=&t->f;
   u32 layers= t->target==GL_TEXTURE_3D? 1 : t->d;
@@ -330,6 +400,12 @@ static void tex_upload(Tex* t){ st_tex_up+=t->size; u64 upload_start=plat_ns(), 
   glPixelStorei(GL_UNPACK_ALIGNMENT,1); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
   int was_zero3d= t->target==GL_TEXTURE_3D? t->zero3d : 0; (void)was_zero3d;
   if(t->target==GL_TEXTURE_3D) t->zero3d=1;
+  { /* SWR_TRACE_ARRAY=1: for array textures, where each layer is read from and how much of it holds data */
+    static int tr=-1; if(tr<0) tr=getenv("SWR_TRACE_ARRAY")!=NULL;
+    if(tr && layers>1){ u64 lv0=bl_level_size(t->w,t->h,depth3d,f,t->bh,t->bd,0,NULL);
+      LOG("array %ux%ux%u at %llx fkey %x: %u levels, block %ux%u, bh %u, level 0 %llu bytes, layer stride %llu\n",t->w,t->h,t->d,(unsigned long long)t->gva,t->fkey,t->levels,f->bw,f->bh,t->bh,(unsigned long long)lv0,(unsigned long long)layer_size);
+      for(u32 L=0;L<layers && L<8;L++){ u64 nz=0, n=0; for(u64 k=0;k<lv0;k+=4096){ u32 v=0; gmem_read(t->gva+L*layer_size+k,&v,4); n++; if(v) nz++; }
+        LOG("  layer %u at +%llx: %llu of %llu samples nonzero\n",L,(unsigned long long)(L*layer_size),(unsigned long long)nz,(unsigned long long)n); } } }
   for(u32 layer=0;layer<layers;layer++){
     u64 off=layer*layer_size;
     for(u32 l=0;l<t->levels;l++){
@@ -352,6 +428,9 @@ static void tex_upload(Tex* t){ st_tex_up+=t->size; u64 upload_start=plat_ns(), 
       upload_unpack_ns+=plat_ns()-upload_stage; upload_stage=plat_ns();
       const u8* up=lin; u8* dec=NULL;
       if((f->astc||f->dec) && !(dec=upload_buffer(&upload_decoded,(u64)lw*lh*4+64))){ upload_release(&upload_linear,lin); if(!direct) upload_release(&upload_source,src); off+= t->bl? lsz : (u64)t->pitch*th; continue; }
+      if(f->astc && t->target==GL_TEXTURE_2D && layers==1 && l+1<t->levels && a_async==(int)l && (u64)lw*lh>128u*128u && aj_on()){
+        aj_push(t,l,lw,lh,f->bw,f->bh,lin,(size_t)rowb*th); a_async++;
+        upload_release(&upload_decoded,dec); upload_release(&upload_linear,lin); if(!direct) upload_release(&upload_source,src); off+= t->bl? lsz : (u64)t->pitch*th; continue; }
       if(f->astc){ astc_decode_image(lin,lw,lh,f->bw,f->bh,dec); up=dec; }
       else if(f->dec){ u32* o=(u32*)dec;
         if(f->dec<10){ swr_bc_decode(f->dec,lin,lw,lh,o); }
@@ -368,7 +447,12 @@ static void tex_upload(Tex* t){ st_tex_up+=t->size; u64 upload_start=plat_ns(), 
       upload_stage=plat_ns();
       if(f->compressed && !f->astc && !f->dec){
         GLsizei isz=(GLsizei)(rowb*th);
-        if(t->target==GL_TEXTURE_2D) glCompressedTexSubImage2D(GL_TEXTURE_2D,l,0,0,lw,lh,f->ifmt,isz,up);
+        u32 uo= (t->target==GL_TEXTURE_2D || t->target==GL_TEXTURE_2D_ARRAY || t->target==GL_TEXTURE_CUBE_MAP_ARRAY)? ur2_alloc((u32)isz) : ~0u;
+        if(uo!=~0u){ memcpy(g_ur2_ptr+uo,up,(size_t)isz); glBindBuffer(GL_PIXEL_UNPACK_BUFFER,g_ur2);
+          if(t->target==GL_TEXTURE_2D) glq_compressed_sub_pbo(0,GL_TEXTURE_2D,l,0,0,0,lw,lh,1,f->ifmt,isz,uo);
+          else glq_compressed_sub_pbo(1,t->target,l,0,0,(GLint)layer,lw,lh,1,f->ifmt,isz,uo);
+          glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0); }
+        else if(t->target==GL_TEXTURE_2D) glCompressedTexSubImage2D(GL_TEXTURE_2D,l,0,0,lw,lh,f->ifmt,isz,up);
         else if(t->target==GL_TEXTURE_2D_ARRAY || t->target==GL_TEXTURE_CUBE_MAP_ARRAY) glCompressedTexSubImage3D(t->target,l,0,0,layer,lw,lh,1,f->ifmt,isz,up);
         else if(t->target==GL_TEXTURE_CUBE_MAP) glCompressedTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X+layer,l,0,0,lw,lh,f->ifmt,isz,up);
         else if(t->target==GL_TEXTURE_3D) glCompressedTexSubImage3D(GL_TEXTURE_3D,l,0,0,0,lw,lh,ld,f->ifmt,isz*ld,up);
@@ -385,6 +469,7 @@ static void tex_upload(Tex* t){ st_tex_up+=t->size; u64 upload_start=plat_ns(), 
       off+= t->bl? lsz : (u64)t->pitch*th;
     }
   }
+  t->abase=a_async; if(t->target==GL_TEXTURE_2D && f->astc && t->levels>1) glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,a_async);   /* async levels come later (aj_drain) */
   u64 upload_total=plat_ns()-upload_start;
   tex_stage_totals[0]+=upload_total; tex_stage_totals[1]+=upload_read_ns; tex_stage_totals[2]+=upload_unpack_ns; tex_stage_totals[3]+=upload_decode_ns; tex_stage_totals[4]+=upload_driver_ns;
   if(upload_total>10000000ull) LOG("texture upload: %ux%ux%u levels=%u format=%x astc=%u decode=%u bytes=%llu total=%.2f read=%.2f unpack=%.2f decode=%.2f driver=%.2f ms\n",t->w,t->h,t->d,t->levels,t->fkey,f->astc,f->dec,(unsigned long long)t->size,upload_total/1e6,upload_read_ns/1e6,upload_unpack_ns/1e6,upload_decode_ns/1e6,upload_driver_ns/1e6);
@@ -436,7 +521,10 @@ static Tex* tex_create(u64 gva, u32 w, u32 h, u32 d, u32 levels, GLenum target, 
   tex_creation_ns+=plat_ns()-creation_start;
   return t; }
 
-static Tex* tex_find_rt(u64 gva){ for(Tex* t=texh[hkey(gva)];t;t=t->next) if(t->gva==gva && t->is_rt) return t; return NULL; }
+/* with dynamic resolution several RTs share an address (Prime 4's depth: 1600x900 and 1440x808 in one frame);
+   the one drawn to last holds what the game reads */
+static u64 g_wtick;
+static Tex* tex_find_rt(u64 gva){ Tex* b=NULL; for(Tex* t=texh[hkey(gva)];t;t=t->next) if(t->gva==gva && t->is_rt && (!b || t->wtick>b->wtick)) b=t; return b; }
 
 /* the game samples an RT through a smaller TIC (DRS, crops). On hw uv 1.0 is the TIC edge, not the RT
    edge, so hand out a copy of just that region */
@@ -736,7 +824,7 @@ static Tex* tex_from_tic_(u32* tic){
   if(rt && !f.compressed && !f.astc && rt->w>=w && rt->h>=h){ rt->last_used=g_frame; return (rt->w==w && rt->h==h)? rt : rt_crop(rt,w,h); }   /* smaller view -> just that region */
   GLenum target=tex_target(type,d);
   if(target==GL_TEXTURE_CUBE_MAP && d!=6) target=GL_TEXTURE_2D_ARRAY;
-  if(f.astc && levels>1) levels=1;
+  if(f.astc && levels>1 && (g_has_astc || getenv("SWR_ASTC_SYNC"))) levels=1;   /* the CPU path keeps the mips (background decode) */
   for(Tex* t=texh[hkey(gva)];t;t=t->next){
     if(t->gva==gva && t->w==w && t->h==h && t->d==d && t->fkey==fkey && t->target==target && !t->is_rt){
       t->last_used=g_frame;
@@ -821,8 +909,8 @@ static void aw_write(const char* path, const void* d, size_t n, int append);
 
 /* common epilogue stuff: alpha test for FS, Y flip for VS */
 
-#define TR_VERSION 0x5174u   /* bump when the GLSL output changes, invalidates caches */
-#define TRANSLATED_PATH "shader_cache/translated_v5174.bin"
+#define TR_VERSION 0x517fu   /* bump when the GLSL output changes, invalidates caches */
+#define TRANSLATED_PATH "shader_cache/translated_v5179.bin"
 typedef struct {u32 idx,off,value;} TransDep;
 typedef struct Translated {u64 key;ShaderInfo si;char*src;u32 ndep;TransDep dep[128];struct Translated*next;} Translated;
 static Translated* translated[512];static u32 translated_count,translated_hits;
@@ -862,6 +950,36 @@ static void translated_save(u64 key,const ShaderInfo*si,const char*src){
   aw_write(TRANSLATED_PATH,d,bytes,1);free(d);
 }
 
+/* NaN guard: a pixel shader's float outputs have NaN replaced by 0 before every return. A NaN written to an HDR target
+   spreads through the blur and downsample passes into hard-edged black boxes over the whole view (Metroid Prime 4's
+   sky and cliffs); real hardware does not pass them on like that. SWR_NO_NAN_GUARD=1: off */
+/* debugging: SWR_DBG_FS=<hash>@<anchor text>@<vec4 expr> shows expr (taken right after the line holding anchor) as that
+   pixel shader's output, to look at a shader's intermediate values on screen */
+static char* sh_dbg(char* src, u64 h){
+  const char* e=getenv("SWR_DBG_FS"); if(!e || !src) return src;
+  char hs[20]; snprintf(hs,sizeof hs,"%016llx",(unsigned long long)h); if(strncmp(e,hs,16)||e[16]!='@') return src;
+  const char* a=e+17; const char* at=strchr(a,'@'); if(!at) return src;
+  char anc[256]; snprintf(anc,sizeof anc,"%.*s",(int)(at-a),a);
+  char* p=strstr(src,anc); char* m=strstr(src,"void main"); if(!p||!m) { WARN("SWR_DBG_FS: anchor not found\n"); return src; }
+  char* eol=strchr(p,'\n'); if(!eol) return src;
+  size_t n=strlen(src)+strlen(at)*2+4096; char* o=malloc(n); size_t k=0;
+  k+=snprintf(o+k,n-k,"%.*svec4 dbg_v=vec4(0);\n",(int)(m-src),src);
+  k+=snprintf(o+k,n-k,"%.*s dbg_v=(%s);\n",(int)(eol+1-m),m,at+1);
+  for(const char* q=eol+1;*q;){ if(!strncmp(q,"return;",7)){ k+=snprintf(o+k,n-k,"{frag_color0=dbg_v;return;}"); q+=7; } else o[k++]=*q++; if(k+64>n) break; }
+  o[k]=0; LOG("SWR_DBG_FS: shader %s patched\n",hs); return o;
+}
+static char* sh_nan_guard(char* src){
+  static int off=-1; if(off<0) off=getenv("SWR_NO_NAN_GUARD")!=NULL;
+  if(off || !src) return src;
+  char outs[512]=""; int o=0, any=0;
+  for(int rt=0;rt<8;rt++){ char decl[64]; snprintf(decl,sizeof decl,"out vec4 frag_color%d;",rt);
+    if(strstr(src,decl)){ o+=snprintf(outs+o,sizeof outs-o,"frag_color%d = mix(frag_color%d, vec4(0.0), isnan(frag_color%d)); ",rt,rt,rt); any=1; } }
+  if(!any) return src;
+  size_t n=0; for(const char* q=src;(q=strstr(q,"return;"));q+=7) n++;
+  if(!n) return src;
+  char* out=malloc(strlen(src)+n*(strlen(outs)+8)+16); char* w=out; const char* q=src;
+  while(*q){ if(!strncmp(q,"return;",7)){ w+=sprintf(w,"{ %sreturn; }",outs); q+=7; } else *w++=*q++; }
+  *w=0; free(src); return out; }
 static char* sh_post(char* src, int stage){
   /* alpha test: discard before every return */
   if(stage==ST_FS && src && strstr(src,"out vec4 frag_color0")){ char* p=strstr(src,"void main(){"); if(p){ size_t pre=p-src;
@@ -914,7 +1032,8 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   if(s->si.unsupported && strstr(s->si.first_unsupported,"untracked")){ static int nd; if(nd<8){ nd++; char fp[200]; plat_mkdir("captures"); plat_mkdir("captures/failed");
       snprintf(fp,sizeof fp,"captures/failed/%016llx_%s.bin",(unsigned long long)h,stage==ST_VS?"vs":"fs"); aw_write(fp,code,0x10000,0);
       LOG("shader %016llx saved to %s (send it so the missing texture can be analyzed)\n",(unsigned long long)h,fp); } }
-  if(!cached){src=sh_post(src,stage);translated_save(trans_key,&s->si,src);}
+  if(!cached){src=sh_post(src,stage);if(stage==ST_FS)src=sh_nan_guard(src);translated_save(trans_key,&s->si,src);}
+  if(stage==ST_FS) src=sh_dbg(src,h);
   GLenum ty= stage==ST_VS? GL_VERTEX_SHADER : stage==ST_FS? GL_FRAGMENT_SHADER : stage==ST_GS? GL_GEOMETRY_SHADER : stage==ST_CS? GL_COMPUTE_SHADER : stage==ST_TCS? GL_TESS_CONTROL_SHADER : GL_TESS_EVALUATION_SHADER;
   (void)ty; if(!src) s->failed=1;
   if(stage==ST_VS) src=dlg_vs_xfb(src);   /* DLAA: positions captured for motion vectors */
@@ -1035,12 +1154,18 @@ static WRing wq_hi, wq_lo; static volatile int g_worker;   /* 0 not started, 1 r
 static int wr_push(WRing* r, WJob* j){ u32 t=__atomic_load_n(&r->t,__ATOMIC_RELAXED), h=__atomic_load_n(&r->h,__ATOMIC_ACQUIRE); if(t-h>=WQN) return 0;
   r->e[t%WQN]=j; __atomic_store_n(&r->t,t+1,__ATOMIC_RELEASE); return 1; }
 
-static WJob* wr_pop(WRing* r){ u32 h=__atomic_load_n(&r->h,__ATOMIC_RELAXED), t=__atomic_load_n(&r->t,__ATOMIC_ACQUIRE); if(h==t) return NULL;
-  WJob* j=r->e[h%WQN]; __atomic_store_n(&r->h,h+1,__ATOMIC_RELEASE); return j; }
+/* one producer (the GPU thread), any number of compile threads taking jobs */
+static WJob* wr_pop(WRing* r){ for(;;){ u32 h=__atomic_load_n(&r->h,__ATOMIC_ACQUIRE), t=__atomic_load_n(&r->t,__ATOMIC_ACQUIRE); if(h==t) return NULL;
+  WJob* j=r->e[h%WQN]; if(__atomic_compare_exchange_n(&r->h,&h,h+1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return j; } }
 extern int backend_gl_worker_current(void);
 
+int g_gl_workers=1;   /* compile threads the backend made contexts for (backend_x11.c: [Performance] shader_threads) */
+static volatile int g_workers_up, g_workers_done;
 static void shader_worker(void* arg){ plat_diag_role("shader-worker");
-  (void)arg; if(!backend_gl_worker_current()){ __atomic_store_n(&g_worker,-1,__ATOMIC_RELEASE); return; }
+  (void)arg; int ok=backend_gl_worker_current();
+  if(ok) __atomic_add_fetch(&g_workers_up,1,__ATOMIC_ACQ_REL);
+  __atomic_add_fetch(&g_workers_done,1,__ATOMIC_ACQ_REL);
+  if(!ok){ if(__atomic_load_n(&g_workers_done,__ATOMIC_ACQUIRE)>=g_gl_workers && !__atomic_load_n(&g_workers_up,__ATOMIC_ACQUIRE)) __atomic_store_n(&g_worker,-1,__ATOMIC_RELEASE); return; }
   __atomic_store_n(&g_worker,1,__ATOMIC_RELEASE);
   { extern int g_opt_cmp_low; if(g_opt_cmp_low) plat_thread_low_priority(); }   /* only use the CPU the game isn't using */
   for(;;){
@@ -1066,12 +1191,21 @@ static void shader_worker(void* arg){ plat_diag_role("shader-worker");
     if(lo) plat_sleep_ns(2000000);   /* background work yields to the game */
   } }
 
+/* SWR_SYNC_SHADERS ([Launcher] wait_for_shaders=1, the default): a draw compiles its new shader and waits for it (no
+   missing objects). The compile threads still start: they rebuild the shader pack (everything seen in earlier sessions
+   that has no program binary for this driver yet) in the background, so later first uses load a binary instead of
+   compiling. Before, this mode had no compile thread, and without GL_KHR_parallel_shader_compile (radeonsi) nothing
+   was precompiled at all */
+static int g_sync_draws;
 static void worker_start(void){
-  if(getenv("SWR_SYNC_SHADERS")){ g_worker=-1; return; }
-  if(plat_thread(shader_worker,NULL,8u<<20)){ g_worker=-1; return; }
-  u64 t0=plat_ns(); while(!__atomic_load_n(&g_worker,__ATOMIC_ACQUIRE) && plat_ns()-t0<2000000000ull) plat_sleep_ns(1000000);
+  g_sync_draws= getenv("SWR_SYNC_SHADERS")!=NULL;
+  int started=0; for(int i=0;i<g_gl_workers;i++) if(!plat_thread(shader_worker,NULL,8u<<20)) started++;
+  if(!started){ g_worker=-1; return; }
+  u64 t0=plat_ns(); while(__atomic_load_n(&g_workers_done,__ATOMIC_ACQUIRE)<started && plat_ns()-t0<2000000000ull) plat_sleep_ns(1000000);
   if(g_worker!=1) g_worker=-1;
-  LOG("shaders: compiler thread %s\n",g_worker==1? "active (shaders compile in the background without freezing the game)" : "not available (shaders compile on the GPU thread)"); }
+  if(g_worker==1) LOG("shaders: %d compiler thread%s active (%s)\n",g_workers_up,g_workers_up==1? "" : "s",
+                      g_sync_draws? "draws wait for their new shaders; the threads precompile the shader pack" : "shaders compile in the background without freezing the game");
+  else LOG("shaders: compiler thread not available (shaders compile on the GPU thread)\n"); }
 /* ============================================================ separable programs
    one program per shader stage, compiled once; draws just bind the stages instead of linking every
    vs+fs combination */
@@ -1094,7 +1228,7 @@ static int sh_sep_ready(Sh* s){
   u64 key=sh_key(s); pcache_init();
   {GLuint p=warm_stage_take(key,&s->uloc);if(p){s->sp=p;s->sps=2;return 1;}}
 
-  if(g_worker==1){ /* disk binary or compile, both on the compile thread */
+  if(g_worker==1 && !g_sync_draws){ /* disk binary or compile, both on the compile thread */
     struct WJob* j=calloc(1,sizeof *j); j->vs=s->src; j->key=key; j->keep=1; j->sep=1; j->stype= s->stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
     if(g_pcache>0){ j->try_bin=1; snprintf(j->bin_path,sizeof j->bin_path,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key); }
     if(wr_push(&wq_hi,j)){ s->sj=j; s->sps=1; return 0; }
@@ -1102,7 +1236,7 @@ static int sh_sep_ready(Sh* s){
   if(g_pcache>0){char path[160];snprintf(path,sizeof path,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
     GLuint p=binary_load(path,1);if(p){s->sp=p;s->sps=2;sh_uloc(s);pack_add_sh(key,s);return 1;}}
   struct WJob* j=calloc(1,sizeof *j); j->vs=s->src; j->key=key; j->keep=1; j->sep=1; j->stype= s->stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
-  if(g_worker==1 && wr_push(&wq_hi,j)){ s->sj=j; s->sps=1; return 0; }
+  if(g_worker==1 && !g_sync_draws && wr_push(&wq_hi,j)){ s->sj=j; s->sps=1; return 0; }
   /* no compile thread, do it inline */
   u64 inline_start=plat_ns();
   GLuint a=glCreateShader(j->stype); const char* s1=s->src; glShaderSource(a,1,&s1,NULL); glCompileShader(a);
@@ -1126,7 +1260,7 @@ static Prog* program_get(Sh* vs, Sh* fs){
   u32 k=(u32)((((size_t)vs)>>4)^(((size_t)fs)>>6))&511;
   for(Prog* p=progs[k];p;p=p->next) if(p->vs==vs && p->fs==fs) return p;
   Prog* p=calloc(1,sizeof *p); p->vs=vs; p->fs=fs;
-  if(g_worker==1 && vs && fs && !vs->failed && !fs->failed && vs->src && fs->src && !prog_cached(vs,fs)){
+  if(g_worker==1 && !g_sync_draws && vs && fs && !vs->failed && !fs->failed && vs->src && fs->src && !prog_cached(vs,fs)){
     WJob* j=calloc(1,sizeof *j); j->vs=vs->src; j->fs=fs->src; j->key=prog_key(vs,fs); j->keep=1;
     if(wr_push(&wq_hi,j)){ p->job=j; p->next=progs[k]; progs[k]=p; return p; } free(j); }
   p->p=prog_build(vs,fs,&p->pending);
@@ -1218,16 +1352,16 @@ static void bind_framebuffer(GpuChannel* ch){
         if(v){ v->wgen++; v->last_used=g_frame;
           if(g_clear_layer>=0) lay[i]=(int)(rt[8]&0xFFFF)+g_clear_layer; else lay[i]= g_draw_layered? -1 : (int)(rt[8]&0xFFFF);
           if(lay[i]>=(int)dep) lay[i]=(int)dep-1; if(lay[i]==-1) anylay=1;
-          g_rt[i]=t; sig[i]=v->id; n=i+1; t->gpu_written=1; t->wgen++; continue; } } }
+          g_rt[i]=t; sig[i]=v->id; n=i+1; t->gpu_written=1; t->wgen++; t->wtick=++g_wtick; continue; } } }
     g_rt[i]=t; sig[i]= t? t->id : 0;
-    if(t){ n=i+1; t->gpu_written=1; t->wgen++; }
+    if(t){ n=i+1; t->gpu_written=1; t->wgen++; t->wtick=++g_wtick; }
   }
   g_nrt=n;
   g_zt=NULL;
   if(r[0x54E]){ u64 za=((u64)r[0x3F8]<<32)|r[0x3F9]; u32 zw=r[0x48A], zh=r[0x48B];
     if(za && zw && zh) g_zt=rt_texture(za,zw,zh,r[0x3FA],r[0x3FB],1); }
   if(anylay && g_zt){ g_zt=NULL; static int said; if(!said){ said=1; LOG("gpu: layered draw with depth: drawn without depth\n"); } }
-  if(g_zt) g_zt->wgen++;
+  if(g_zt){ g_zt->wgen++; g_zt->wtick=++g_wtick; }
   GLenum att= g_zt? (g_zt->f.fmt==GL_DEPTH_STENCIL? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT) : GL_DEPTH_STENCIL_ATTACHMENT;
   sig[8]= g_zt? g_zt->id : 0; sig[9]=att;
   if(g_fb_sig_ok && !memcmp(sig,g_fb_sig,sizeof sig) && !memcmp(lay,g_fb_lay,sizeof lay)){ st_fb_skip++; return; }
@@ -1276,8 +1410,58 @@ static void rt_scaled_put(Tex* t, GLuint tmp){
    into the final texture */
 static int rt_flushable(Tex* t){ return t && !t->f.depth && !t->f.compressed && t->f.bpp>0 && t->f.bpp<=16 && t->target==GL_TEXTURE_2D && !t->vol; }
 
+static PFNGLMAPBUFFERRANGEPROC p_rbmap; static PFNGLUNMAPBUFFERPROC p_rbunmap; static PFNGLFENCESYNCPROC p_rbfs; static PFNGLCLIENTWAITSYNCPROC p_rbcws; static PFNGLDELETESYNCPROC p_rbds; static PFNGLBUFFERSTORAGEPROC p_rbbs;
+static int rb_procs(void){ if(!p_rbmap){ p_rbmap=(PFNGLMAPBUFFERRANGEPROC)backend_gl_proc("glMapBufferRange"); p_rbunmap=(PFNGLUNMAPBUFFERPROC)backend_gl_proc("glUnmapBuffer");
+    p_rbfs=(PFNGLFENCESYNCPROC)backend_gl_proc("glFenceSync"); p_rbcws=(PFNGLCLIENTWAITSYNCPROC)backend_gl_proc("glClientWaitSync"); p_rbds=(PFNGLDELETESYNCPROC)backend_gl_proc("glDeleteSync"); p_rbbs=(PFNGLBUFFERSTORAGEPROC)backend_gl_proc("glBufferStorage"); }
+  return p_rbmap && p_rbunmap && p_rbfs && p_rbcws && p_rbds && p_rbbs; }
+/* write a finished asynchronous readback into guest memory */
+static void rt_rb_store(Tex* t, u64 gva, const u8* px){
+  u32 w=t->rb_w, h=t->rb_h, bp=t->f.bpp;
+  u64 sz= t->bl? bl_level_size(w,h,1,&t->f,t->bh,0,0,NULL) : (u64)w*h*bp; u8* dst=gmem_ptr(gva,sz);
+  if(dst){ if(t->bl) swizzle(dst,px,w*bp,w*bp,h,t->bh); else memcpy(dst,px,(size_t)w*h*bp); }
+  t->hash=rt_sig(gva); }
+static int rt_rb_collect(Tex* t, u64 gva, int wait){
+  if(!t->rb_fence || !rb_procs()) return 0;
+  GLenum r=p_rbcws(t->rb_fence,wait? GL_SYNC_FLUSH_COMMANDS_BIT : 0,wait? 1000000000ull : 0);
+  if(r!=GL_ALREADY_SIGNALED && r!=GL_CONDITION_SATISFIED) return 0;
+  p_rbds(t->rb_fence); t->rb_fence=0;
+  if(t->rb_ptr) rt_rb_store(t,gva,t->rb_ptr);   /* persistent coherent mapping: no GL call, so no wait for the GL thread */
+  return 1; }
+
+/* Small render targets read back for a copy (Prime 4's 16x1 auto-exposure every frame) are read asynchronously: a
+   synchronous read waits for the whole frame queued so far, which turned into 50-300 ms hitches when the driver had
+   work piled up. The copy gets the previous finished read (a frame or two old, which exposure doesn't notice).
+   SWR_SYNC_READBACK=1 reads synchronously as before */
+static int g_rb_read_only;   /* set by gpu_gl_rt_flush_read: the caller only reads the memory */
+static int rt_flush_async(Tex* t, u64 gva){
+  static int off=-1; if(off<0) off=getenv("SWR_SYNC_READBACK")!=NULL;
+  if(off || !g_rb_read_only || !rb_procs() || (u64)t->w*t->h>4096 || g_gles) return 0;
+  u64 q0=plat_ns();
+  if(t->rb_fence && !rt_rb_collect(t,gva,0)) return 1;
+  u64 q1=plat_ns();   /* previous read still in flight: keep what memory has */
+  u32 w=t->w, h=t->h, bp=t->f.bpp; GLsizeiptr n=(GLsizeiptr)w*h*bp;
+  if(!t->rb_pbo || t->rb_w!=w || t->rb_h!=h){ if(t->rb_pbo){ glDeleteBuffers(1,&t->rb_pbo); t->rb_pbo=0; t->rb_ptr=NULL; }
+    glGenBuffers(1,&t->rb_pbo); glBindBuffer(GL_PIXEL_PACK_BUFFER,t->rb_pbo);
+    p_rbbs(GL_PIXEL_PACK_BUFFER,n,NULL,GL_MAP_READ_BIT|GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT);
+    t->rb_ptr=(const u8*)p_rbmap(GL_PIXEL_PACK_BUFFER,0,n,GL_MAP_READ_BIT|GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT); t->rb_w=w; t->rb_h=h;
+    if(!t->rb_ptr){ glBindBuffer(GL_PIXEL_PACK_BUFFER,0); glDeleteBuffers(1,&t->rb_pbo); t->rb_pbo=0; return 0; } }
+  else glBindBuffer(GL_PIXEL_PACK_BUFFER,t->rb_pbo);
+  u64 q2=plat_ns(); GLuint tmp= g_scale!=1.0f? rt_unscaled_copy(t,1) : 0; u64 q3=plat_ns();
+  glBindFramebuffer(GL_READ_FRAMEBUFFER,g_rfbo); glFramebufferTexture2D(GL_READ_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,tmp? tmp : t->id,0); glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glPixelStorei(GL_PACK_ALIGNMENT,1); glPixelStorei(GL_PACK_ROW_LENGTH,0);
+  if(rt_plain(t)) glq_read_pixels_pbo(0,0,(GLsizei)w,(GLsizei)h,GL_RGBA,GL_UNSIGNED_BYTE,0);
+  else { glBindTexture(GL_TEXTURE_2D,tmp? tmp : t->id); glq_get_tex_image_pbo(GL_TEXTURE_2D,0,t->f.fmt,t->f.type,0); }
+  glBindBuffer(GL_PIXEL_PACK_BUFFER,0);
+  glBindFramebuffer(GL_FRAMEBUFFER,g_fbo); if(tmp) glDeleteTextures(1,&tmp); state_dirty();
+  u64 q4=plat_ns(); t->rb_fence=p_rbfs(GL_SYNC_GPU_COMMANDS_COMPLETE,0); glFlush(); u64 q5=plat_ns();
+  if(q5-q0>10000000ull){ static int sd; if(sd<20){ sd++; LOG("rb: collect %.1f pbo %.1f copy %.1f read %.1f fence %.1f ms\n",(q1-q0)/1e6,(q2-q1)/1e6,(q3-q2)/1e6,(q4-q3)/1e6,(q5-q4)/1e6); } }
+  static int said; if(!said){ said=1; LOG("gpu: small render target readbacks are asynchronous (%ux%u at %llx)\n",w,h,(unsigned long long)gva); }
+  return 1; }
+
 void gpu_gl_rt_flush(u64 gva){
   Tex* t=tex_find_rt(gva); if(!rt_flushable(t) || (g_gles && !rt_plain(t))) return;
+  if(rt_flush_async(t,gva)) return;
+  if(t->rb_fence) rt_rb_collect(t,gva,1);   /* an older async read must not land after this one */
   { static int nlog; if(nlog<40 && !rt_plain(t)){ nlog++; LOG("rt %llx %ux%u (fkey %x) copied to memory for a DMA/2D copy\n",(unsigned long long)gva,t->w,t->h,t->fkey); } }
   u32 w=t->w, h=t->h, bp=t->f.bpp; u8* px=malloc((size_t)w*h*bp); if(!px) return;
   GLuint tmp= g_scale!=1.0f? rt_unscaled_copy(t,1) : 0;
@@ -1289,6 +1473,7 @@ void gpu_gl_rt_flush(u64 gva){
   u64 sz= t->bl? bl_level_size(w,h,1,&t->f,t->bh,0,0,NULL) : (u64)w*h*bp; u8* dst=gmem_ptr(gva,sz);
   if(dst){ if(t->bl) swizzle(dst,px,w*bp,w*bp,h,t->bh); else memcpy(dst,px,(size_t)w*h*bp); }
   free(px); t->hash=rt_sig(gva); trace_note("  (rt %llx -> memory, %u bytes/px)\n",(unsigned long long)gva,bp); }
+void gpu_gl_rt_flush_read(u64 gva){ g_rb_read_only=1; gpu_gl_rt_flush(gva); g_rb_read_only=0; }
 
 /* CPU copy changed the memory, reload the RT */
 void gpu_gl_rt_reload(u64 gva){
@@ -1318,7 +1503,7 @@ int r3d_blit_gl(Surf2Dg* s, Surf2Dg* d, int dx, int dy, int dw, int dh, double s
   glDisable(GL_SCISSOR_TEST); glDisable(GL_FRAMEBUFFER_SRGB); glColorMaski(0,1,1,1,1);
   float S=g_scale; int scaled= sdx!=1.0 || sdy!=1.0 || S!=1.0f;
   glBlitFramebuffer((GLint)(sx*S),(GLint)(sy*S),(GLint)((sx+sdx*dw)*S),(GLint)((sy+sdy*dh)*S),(GLint)(dx*S),(GLint)(dy*S),(GLint)((dx+dw)*S),(GLint)((dy+dh)*S),GL_COLOR_BUFFER_BIT,(scaled && !st->f.is_int)? GL_LINEAR : GL_NEAREST);
-  glBindFramebuffer(GL_FRAMEBUFFER,g_fbo); dt->last_used=g_frame; dt->wgen++;
+  glBindFramebuffer(GL_FRAMEBUFFER,g_fbo); dt->last_used=g_frame; dt->wgen++; dt->wtick=++g_wtick;
   return 1; }
 
 /* ============================================================ fixed state */
@@ -1345,7 +1530,7 @@ static float g_dl_vp[4], g_dl_dr[2], g_dl_po[3];   /* the draw's unjittered view
 static int g_gs_ok;
 
 static void state_dirty(void){ g_state_ok=0; g_gs_ok=0; }
-void gpu_gl_state_dirty(void){ state_dirty(); }   /* the in-game menu drew with its own GL state (dread_ui/ov.cpp) */
+void gpu_gl_state_dirty(void){ state_dirty(); }   /* the in-game menu drew with its own GL state (beyond_ui/ov.cpp) */
 /* FPS counter (main.c fps_overlay_rects) onto the window's framebuffer, as scissored clears */
 void gpu_gl_fps_overlay(void){
   extern int fps_overlay_rects(int,int,int(*)[5],int); int (*r)[5]; int buf[64][5]; r=buf; int w=1,h=1; backend_window_size(&w,&h);
@@ -1590,14 +1775,59 @@ static void capture_draw(GpuChannel* ch, int indexed, u32 first, u32 count){
 #endif
 static GLuint g_sbuf[3][8];
 static GLuint buf_cached(GLenum target, u64 start, u64 len);
+static GLenum img_fmt(GLenum f);
+/* image stores in vertex and pixel shaders (SUST): bind each image the shader writes at this draw, units 0-3 for the
+   vertex stage and 4-7 for the pixel stage (shader.c), and make the next draw see the writes. The written texture is
+   marked GPU-written, so it is sampled as it is instead of being reloaded from memory (or, for an empty 3D volume,
+   replaced by a neutral table) */
+static int g_img_pending;
+static void bind_imgs(GpuChannel* ch, int stage, Sh* s){
+  if(stage==0 && g_img_pending){ glMemoryBarrier(0x20|0x08|0x100);   /* image access | texture fetch | texture update */ g_img_pending=0; }
+  if(!s || !s->si.nimg) return;
+  u32* r=ch->r3d; u32 tcb=r[0x982]&31; u64 tic_base=((u64)r[0x55D]<<32)|r[0x55E]; int base= stage==4? 4 : 0;
+  for(int i=0;i<s->si.nimg && i<4;i++){ u32 cb= s->si.img[i].bindless? (u32)(s->si.img[i].bl_cbuf&31) : tcb; u32 h=0; u64 cba= cb<18? g_cb.cb[stage][cb] : 0;
+    if(cba) gmem_read(cba+(u64)s->si.img[i].cbuf_off*4,&h,4);
+    u32 tic[8]; gmem_read(tic_base+(u64)(h&0xFFFFF)*32ull,tic,32); Tex* t= h? tex_from_tic(tic) : NULL; GLenum f= t? img_fmt(t->f.ifmt) : 0;
+    if(t && f){ int ty=s->si.img[i].type; glBindImageTexture(base+i,t->id,0,(ty==2||ty==4||ty==5)? GL_TRUE : GL_FALSE,0,GL_WRITE_ONLY,f); t->gpu_written=1; t->wgen++; g_img_pending=1;
+      static int said; if(said<8){ said++; LOG("gpu: %s shader writes image %ux%ux%u at %llx (format %x)\n",stage==4? "pixel" : "vertex",t->w,t->h,t->d,(unsigned long long)t->gva,f); } }
+    else { glBindImageTexture(base+i,0,0,GL_FALSE,0,GL_WRITE_ONLY,GL_R32F); static int said; if(said<4){ said++; LOG("gpu: image %d of a %s shader without a usable texture (handle %x)\n",i,stage==4? "pixel" : "vertex",h); } } } }
 
+/* Global buffers written by vertex/pixel shaders (STG) stay on the GPU: one GL buffer per address, kept between draws.
+   Metroid Prime 4 builds its light list in the first draw of each frame (a vertex shader writing the buffer every lit
+   material reads); each draw used to get a fresh copy from guest memory, which never sees GPU writes, so materials read
+   stale light data (the arm cannon one flat colour that changed from run to run). A buffer is refilled from guest
+   memory only when the CPU changed it (hash); later reads inside its range bind it at an offset. SWR_NO_GPU_SSBO=1: off */
+typedef struct { u64 addr; u32 size; GLuint id; u64 hash; } GwBuf;
+static GwBuf g_gw[32]; static int g_ngw, g_gw_pending, g_gw_off=-1; static GLint g_ssbo_align;
+static GwBuf* gw_find(u64 a){ for(int i=0;i<g_ngw;i++) if(a>=g_gw[i].addr && a<g_gw[i].addr+g_gw[i].size) return &g_gw[i]; return NULL; }
+static GwBuf* gw_get(u64 a, u32 n){
+  static u8* tmp; static size_t cap; if(cap<n){ tmp=realloc(tmp,n); cap=n; } if(!tmp) return NULL;
+  gmem_read(a,tmp,n); u64 h=fast_hash(tmp,n,3);
+  GwBuf* g=NULL; for(int i=0;i<g_ngw;i++) if(g_gw[i].addr==a){ g=&g_gw[i]; break; }
+  if(!g){ if(g_ngw>=32) return NULL; g=&g_gw[g_ngw++]; memset(g,0,sizeof *g); g->addr=a; glGenBuffers(1,&g->id);
+    static int said; if(said<8){ said++; LOG("gpu: global buffer %llx (%u bytes) is written by shaders: kept on the GPU between draws\n",(unsigned long long)a,n); } }
+  if(g->size<n){ g->size=n; glBindBuffer(GL_SHADER_STORAGE_BUFFER,g->id); glBufferData(GL_SHADER_STORAGE_BUFFER,n,tmp,GL_DYNAMIC_COPY); g->hash=h; }
+  else if(g->hash!=h){ glBindBuffer(GL_SHADER_STORAGE_BUFFER,g->id); glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,n,tmp); g->hash=h; }   /* the CPU wrote new input */
+  return g; }
 static void bind_gbufs(int stage, Sh* s){
+  if(g_gw_off<0){ g_gw_off=getenv("SWR_NO_GPU_SSBO")!=NULL; glGetIntegerv(0x90DF /* SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT */,&g_ssbo_align); if(g_ssbo_align<=0) g_ssbo_align=256; }
+  if(stage==0 && g_gw_pending){ glMemoryBarrier(0x2000|0x200|0x1); g_gw_pending=0; }   /* storage | buffer update | vertex attrib: the last draw's writes */
   if(!s->si.ngbuf) return; int slot= stage==0? 0 : stage==4? 1 : 2; u64 cb0=g_cb.cb[stage][0];
   static u8* tmp; static size_t cap;
   for(int i=0;i<s->si.ngbuf && i<8;i++){
     if(!g_sbuf[slot][i]) glGenBuffers(1,&g_sbuf[slot][i]);
-    u64 addr=0; u32 size=16; if(cb0){ u32 v[3]; gmem_read(cb0+s->si.gbuf_cbuf_off[i],v,12); addr=((u64)v[1]<<32)|v[0]; size=v[2]; }
+    /* the address from its constant buffer; the size from NVN's table, or for a bare pointer (the game's own) as much
+       contiguous GPU memory as is mapped from it, up to 1 MB */
+    u64 addr=0; u32 size=16; u32 bank=s->si.gbuf_cbuf_idx[i]; u64 cbb= bank<18? g_cb.cb[stage][bank] : 0; (void)cb0;
+    if(cbb){ u32 v[3]; gmem_read(cbb+s->si.gbuf_cbuf_off[i],v,12); addr=((u64)v[1]<<32)|v[0]; size= s->si.gbuf_sized[i]? v[2] : 0; }
+    if(addr && !s->si.gbuf_sized[i]){ extern u64 gmmu_run(u64,u64,u64*); u64 cpu=0; u64 run=gmmu_run(addr,1u<<20,&cpu); size= run>16? (u32)run : 16; }
+    { u32 nv[4]={0,0,0,0}; if(cbb) gmem_read(cbb+s->si.gbuf_cbuf_off[i],nv,16);
+      trace_note("  %s gbuf%d: cb%u[0x%x] -> address %llx, next words %08x %08x, %s, bound %u bytes\n",stage==0? "vs" : "fs",i,bank,s->si.gbuf_cbuf_off[i],(unsigned long long)addr,nv[2],nv[3],s->si.gbuf_sized[i]? "size from NVN's table" : "size from the mapping",size); }
     if(!size) size=16; if(size>(16u<<20)) size=16u<<20; size=(size+3)&~3u;
+    if(addr && !g_gw_off){ int wr=(s->si.gbuf_wmask>>i)&1;
+      if(wr){ GwBuf* g=gw_get(addr,size); if(g){ glBindBufferBase(GL_SHADER_STORAGE_BUFFER,slot*8+i,g->id); g_gw_pending=1; trace_note("    -> written: kept on the GPU\n"); continue; } }
+      else { GwBuf* g=gw_find(addr); u64 o= g? addr-g->addr : 0;
+        if(g && !(o%(u64)g_ssbo_align)){ u64 n=g->size-o; if(n>size) n=size; glBindBufferRange(GL_SHADER_STORAGE_BUFFER,slot*8+i,g->id,(GLintptr)o,(GLsizeiptr)n); trace_note("    -> the GPU copy, offset %llu\n",(unsigned long long)o); continue; } } }
     { static int nc=-1; if(nc<0) nc=getenv("SWR_NO_SSBO_CACHE")!=NULL;
       if(!nc && addr && !((s->si.gbuf_wmask>>i)&1)){ GLuint id=buf_cached(GL_SHADER_STORAGE_BUFFER,addr,size); if(id){ glBindBufferBase(GL_SHADER_STORAGE_BUFFER,slot*8+i,id); continue; } } }
     if(cap<size){ tmp=realloc(tmp,size); cap=size; }
@@ -1920,6 +2150,8 @@ static void dlg_frame(void){
    res1/res2). A filtered read of a scaled render target by a draw at least 2x smaller (guest sizes) gets a copy of the
    target box-averaged by 2^lv (a mip chain, read from level lv), so its taps see the averages they do at 1x. Only
    scales of 2 and more; SWR_NO_RT_PREFILTER=1 turns it off */
+static u32 g_rs_mask[2];   /* pixel / vertex texture slots holding a render target stored at the resolution scale (swr_fc) */
+static void rs_update(void);
 static u64 st_prefilter;
 static GLuint rt_prefiltered(Tex* t){
   int lv=0; for(float k=2.0f; k<=g_scale+0.01f; k*=2.0f) lv++;
@@ -1951,6 +2183,7 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
   u64 tic_base=((u64)r[0x55D]<<32)|r[0x55E], tsc_base=((u64)r[0x557]<<32)|r[0x558];
   int mb= p_bt!=NULL, slot=(stage==0? 0 : stage==4? 1 : 2), nt=s->si.ntex; if(nt>32) nt=32;
   GLuint tids[32], sids[32];
+  u32 fsmask=0;
   for(int i=0;i<nt;i++){ ShTex* st=&s->si.tex[i];
     u32 handle=sh_tex_handle(stage,tcb,st);
     u32 tic_id=handle&0xFFFFF, tsc_id=(handle>>20)&0xFFF;
@@ -1960,12 +2193,13 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
     /* the shader's sampler type wins */
     GLenum want= st->type==2? GL_TEXTURE_3D : st->type==3? (st->array? GL_TEXTURE_CUBE_MAP_ARRAY : GL_TEXTURE_CUBE_MAP) : st->array? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
     tids[i]=0;
-    if(t && t->target==want && !(want==GL_TEXTURE_3D && t->zero3d && !t->is_rt)){ if(t->is_rt) dlg_read(t); GLuint use=t->id;
+    if(t && t->target==want && !(want==GL_TEXTURE_3D && t->zero3d && !t->is_rt && !t->gpu_written)){ if(t->is_rt) dlg_read(t); GLuint use=t->id;
       if(want==GL_TEXTURE_2D && downsample_read(t,st)){ GLuint pf=rt_prefiltered(t); if(pf) use=pf; }
       { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_PREFILTER_DEBUG")!=NULL;
         if(dbg && t->is_rt && g_rt[0] && g_rt[0]!=t && (t->w>g_rt[0]->w || t->h>g_rt[0]->h)){ static u64 seen[64]; static int ns; u64 k=((u64)t->w<<48)^((u64)t->h<<32)^((u64)g_rt[0]->w<<16)^g_rt[0]->h^((u64)st->fetch_only<<63)^((u64)stage<<60);
           int f=0; for(int q=0;q<ns;q++) if(seen[q]==k) f=1;
           if(!f && ns<64){ seen[ns++]=k; LOG("prefilter: stage %d reads rt %ux%u fmt %x into %ux%u: fetch_only %d type %d array %d shadow %d int %d -> %s\n",stage,t->w,t->h,t->f.ifmt,g_rt[0]->w,g_rt[0]->h,st->fetch_only,st->type,st->array,st->shadow,t->f.is_int,use!=t->id? "PREFILTERED" : "as is"); } } }
+      if((stage==4 || stage==0) && want==GL_TEXTURE_2D && t->is_rt && use==t->id) fsmask|=1u<<i;
       if(mb) tids[i]=use; else glBindTexture(want,use); if(t->is_rt) st_tex_rt++; else st_tex_ok++;
       if(want==GL_TEXTURE_3D){ static u64 seen3[16]; static int n3; int k=0; for(;k<n3;k++) if(seen3[k]==t->gva) break;
         if(k==n3 && n3<16){ seen3[n3++]=t->gva; LOG("gpu: 3D texture %ux%ux%u at %llx %s\n",t->w,t->h,t->d,(unsigned long long)t->gva,t->is_rt? "rendered by the GPU (3D render target)" : "read from memory (has data)"); } } }
@@ -1978,17 +2212,22 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
       /* must match the LUT's real size: the shader samples texel centers (c*(N-1)+0.5)/N, so a 32^3 read as 8^3
          lifts black to ~6% gray */
       int NN= t && t->w>=2 && t->w<=64 && t->w==t->h && t->d==t->w? (int)t->w : 32;
+      /* a volume that is not a cube is not a colour table: Metroid Prime 4's 88x51x64 RGBA16F froxel grid (volumetric
+         fog and light, filled each frame by a compute shader with image stores) read as an identity table gave every
+         lit material coordinate colours (the neon arm cannon, green/orange gradients over the scene). Such a volume gets
+         one voxel of (0,0,0,1): no in-scattered light, full transmittance, i.e. no fog */
+      int fog_vol= t && !(t->w==t->h && t->d==t->w); if(fog_vol){ NN=1; lin_out=0; }
       static GLuint lut_tex[65][2]; GLuint* lt=&lut_tex[NN][lin_out];
       if(!*lt){ const int N=NN; float* px=malloc((size_t)N*N*N*4*4);
         for(int z=0;z<N;z++) for(int y=0;y<N;y++) for(int x=0;x<N;x++){ float* q=px+((size_t)(z*N+y)*N+x)*4; int c3[3]={x,y,z};
-          for(int k=0;k<3;k++){ float v=(float)c3[k]/(float)(N-1); if(lin_out) v= v<=0.04045f? v/12.92f : powf((v+0.055f)/1.055f,2.4f); q[k]=v; } q[3]=1.f; }
+          for(int k=0;k<3;k++){ float v= N>1? (float)c3[k]/(float)(N-1) : 0.f; if(lin_out) v= v<=0.04045f? v/12.92f : powf((v+0.055f)/1.055f,2.4f); q[k]=v; } q[3]=1.f; }
         glGenTextures(1,lt); glBindTexture(GL_TEXTURE_3D,*lt); glTexStorage3D(GL_TEXTURE_3D,1,GL_RGBA16F,N,N,N); glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MAX_LEVEL,0);
         glPixelStorei(GL_UNPACK_ALIGNMENT,1); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
         glTexSubImage3D(GL_TEXTURE_3D,0,0,0,0,N,N,N,GL_RGBA,GL_FLOAT,px); free(px); }
       if(mb) tids[i]=*lt; else glBindTexture(GL_TEXTURE_3D,*lt); st_tex_mismatch++;
       { static u64 seenz[8]; static int nz; int k=0; u64 g= t? t->gva : 0; for(;k<nz;k++) if(seenz[k]==g) break;
         if(k==nz && nz<8){ seenz[nz++]=g; LOG("gpu: 3D texture (color LUT) %ux%ux%u at %llx (fmt %x) has no data: using a %s LUT (SWR_LUT_LINEAR=1: sRGB->linear)\n",
-            t? t->w:0,t? t->h:0,t? t->d:0,(unsigned long long)g,t? t->fkey:0,lin_out? "neutral sRGB->linear" : "identity"); } } }
+            t? t->w:0,t? t->h:0,t? t->d:0,(unsigned long long)g,t? t->fkey:0,fog_vol? "neutral volume (0,0,0,1) instead of a" : lin_out? "neutral sRGB->linear" : "identity"); } } }
     else if(t && tex_view(t,want)){ GLuint v=t->view; if(mb) tids[i]=v; else glBindTexture(want,v); }
     else if(!t && null_tex(want)){ GLuint z=null_tex(want); if(mb) tids[i]=z; else glBindTexture(want,z); st_tex_null++; }
     else { if(!mb) glBindTexture(want,0); if(!t) st_tex_null++; else { st_tex_mismatch++;
@@ -2017,6 +2256,7 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
       int isv= t->target!=want; GLint* cur= isv? t->vswz : t->swz; GLuint tid= isv? t->view : t->id;
       if(memcmp(cur,m,sizeof m)){ memcpy(cur,m,sizeof m); if(mb) glBindTexture(want,tid); /* use the scratch unit */ else glBindTexture(want,tid); glTexParameteriv(want,GL_TEXTURE_SWIZZLE_RGBA,m); } }
   }
+  if((stage==4 || stage==0) && g_scale!=1.0f){ u32* m=&g_rs_mask[stage==4? 0 : 1]; if(fsmask!=*m){ *m=fsmask; rs_update(); } }
   if(mb && nt>0){ int base=slot*32;
     if(g_tb_ok[slot] && g_tb_n[slot]==nt && !memcmp(g_tb_last[slot],tids,(size_t)nt*4) && !memcmp(g_sb_last[slot],sids,(size_t)nt*4)){ st_tb_skip++; return; }
     if(!g_tb_ok[slot] || g_tb_n[slot]!=nt || memcmp(g_tb_last[slot],tids,(size_t)nt*4)) p_bt(base,nt,tids);
@@ -2105,7 +2345,12 @@ static GLuint buf_cached(GLenum target, u64 start, u64 len){
   u8* src=gmem_ptr(start,len); u64 cpu= src? (u64)(src-g_mem) : 0;
   if(!src){ if(g_stage_cap<len){ u8* nb=realloc(g_stage_buf,len); if(!nb) return 0; g_stage_buf=nb; g_stage_cap=len; } gmem_read(start,g_stage_buf,len); src=g_stage_buf; }
   u64 h=fast_hash(src,len,0); st_vb_hashed+=len;
+  int fresh=!e;
   if(!e){ e=calloc(1,sizeof *e); e->start=start; e->len=len; e->csseen=g_csgen; glGenBuffers(1,&e->id); e->next=vbc[k]; vbc[k]=e; e->hash=h^1; }
+  { /* SWR_TRACE_VB=frame: every upload during frames [frame, frame+3) to vb_trace.txt: kind, address, size, new or changed */
+    static int at=-2; static FILE* tf; if(at==-2){ const char* v=getenv("SWR_TRACE_VB"); at= v? atoi(v) : -1; }
+    if(at>=0 && e->hash!=h && g_frame>=(u32)at && g_frame<(u32)at+3){ if(!tf) tf=fopen("vb_trace.txt","w");
+      if(tf) fprintf(tf,"%u %s %llx %llu %s\n",g_frame,target==GL_ELEMENT_ARRAY_BUFFER? "index" : target==GL_SHADER_STORAGE_BUFFER? "ssbo" : "vertex",(unsigned long long)start,(unsigned long long)len,fresh? "new" : "changed"); } }
   glBindBuffer(target,e->id);
   /* 2026-10-23: orphaning rewritten buffers and uploading them as STREAM_DRAW measured no gain at a 240 cap (worse
      seconds under 170): the per-draw driver stall in heavy rooms is not this upload */
@@ -2327,7 +2572,7 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     float at[4]={ (r[0x4BB]&1)? 1.f : 0.f, (float)f, ref, 0 };
     if(g_sep>0){ if(!fs->lu_ok || memcmp(fs->lu,at,16)){ memcpy(fs->lu,at,16); fs->lu_ok=1; glProgramUniform4fv(atp,atl,1,at); } } else glProgramUniform4fv(atp,atl,1,at); }
   TM(TM_CB,(upload_cbufs(0,vs), upload_cbufs(4,fs)));
-  TM(TM_GB,(bind_gbufs(0,vs), bind_gbufs(4,fs)));
+  TM(TM_GB,(bind_gbufs(0,vs), bind_gbufs(4,fs), bind_imgs(ch,0,vs), bind_imgs(ch,4,fs)));
   TM(TM_TEX,(bind_textures(ch,0,vs), bind_textures(ch,4,fs)));
   dlg_draw();
   if(g_dlg.need && dlg_eval()){   /* DLSS ran before this draw: its framebuffer, program and state again */
@@ -2362,7 +2607,16 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     u64 start=((u64)va[1]<<32)|va[2]; u64 lim=((u64)r[0x7C0+buf*2]<<32)|r[0x7C1+buf*2]; u32 stride=va[0]&0xFFF;
     u64 len= lim>=start? lim-start+1 : 0; if(len>64u<<20) len=64u<<20;
     if(!len) { VA_OFF(i); continue; }
-    GLuint vbid=buf_cached(GL_ARRAY_BUFFER,start,len);
+    /* Draws into one vertex buffer each bind it from their own first vertex to the buffer's end (same limit, start a
+       few bytes further on). Cached by (start, length), every draw was a separate entry that hashed and uploaded the
+       whole tail again: Metroid Prime 4 uploaded 50-60 MB of vertices a frame in gameplay (30-40 FPS). Keyed on the
+       limit instead: one region per buffer, from the lowest start seen (grows within 16 MB), bound at an offset */
+    u64 vb_base=start;
+    { static int share=-1; if(share<0) share=!getenv("SWR_NO_VB_SHARE");
+      if(share && lim>=start){ static u64 vl_lim[2048], vl_lo[2048]; u32 h=(u32)((lim>>4)^(lim>>20))&2047;
+        if(vl_lim[h]!=lim || start<vl_lo[h]){ if(vl_lim[h]==lim && vl_lo[h]-start>(16u<<20)) vl_lo[h]=start; else if(vl_lim[h]!=lim){ vl_lim[h]=lim; vl_lo[h]=start; } else vl_lo[h]=start; }
+        if(start-vl_lo[h]<=(16u<<20)){ vb_base=vl_lo[h]; len=lim-vb_base+1; if(len>64u<<20){ len=64u<<20; vb_base=start; len=lim-start+1; if(len>64u<<20) len=64u<<20; } } } }
+    GLuint vbid=buf_cached(GL_ARRAY_BUFFER,vb_base,len); off+=(u32)(start-vb_base);
     u32 cnt=attr_count(size), bits=attr_bits(size);
     GLenum gt; GLboolean norm= ty==1||ty==2;
     if(size==0x30) gt= ty==1? GL_INT_2_10_10_10_REV : GL_UNSIGNED_INT_2_10_10_10_REV;
@@ -2427,7 +2681,7 @@ void r3d_clear_gl(GpuChannel* ch, u32 v){ state_dirty(); g_tmap_gen++;
         if(ct && p_cti && !ct->f.depth){ float cc[4]; memcpy(cc,&r[0x360],16);
           if(ct->f.is_int){ GLuint ui[4]={(GLuint)cc[0],(GLuint)cc[1],(GLuint)cc[2],(GLuint)cc[3]}; p_cti(ct->id,0,ct->f.fmt,GL_UNSIGNED_INT,ui); }
           else p_cti(ct->id,0,GL_RGBA,GL_FLOAT,cc);
-          ct->wgen++; static int said; if(!said){ said=1; LOG("gpu: clear of a RT outside the active list: cleared directly\n"); } } } }
+          ct->wgen++; ct->wtick=++g_wtick; static int said; if(!said){ said=1; LOG("gpu: clear of a RT outside the active list: cleared directly\n"); } } } }
     /* single float RT with color + depth (+stencil): one glClear so the driver can fast clear it all at once */
     if(t && rt==0 && g_nrt==1 && !t->f.is_int && (v&0x3C)==0x3C && (v&1) && g_zt && !getenv("SWR_NO_CLEARMERGE")){
       float cc[4], dz; memcpy(cc,&r[0x360],16); memcpy(&dz,&r[0x364],4);
@@ -2674,8 +2928,63 @@ static void shot8_capture(GLuint tex, const float* xf, int tw, int th){
   glBindBuffer(GL_PIXEL_PACK_BUFFER,0); glBindFramebuffer(GL_FRAMEBUFFER,0);
   g_s8_sync=p_s8fs(GL_SYNC_GPU_COMMANDS_COMPLETE,0); glFlush(); }
 
+/* FSR 1 upscaling ([Graphics] upscaler=fsr): when the picture is enlarged to the window, AMD FidelityFX FSR 1
+   (third_party/fsr1, MIT) replaces the bilinear stretch. The visible part is copied to its own texture (crop and flip
+   resolved), EASU enlarges it to the window's size, and RCAS sharpens it onto the window ([Graphics] fsr_sharpness).
+   Used only when the picture is smaller than the window (resolution below 1, or a bigger window than the game's size). */
+#include "fsr1_glsl.inc"
+int g_opt_upscaler, g_opt_fsr_sharp=80;
+static GLuint g_fsr_easu, g_fsr_rcas, g_fsr_tex[2], g_fsr_fbo[2]; static GLint g_fsr_easu_sz, g_fsr_rcas_k; static int g_fsr_state, g_fsr_w[2], g_fsr_h[2];
+static const char FSR_HEAD[]="#version 450 core\n#define A_GPU 1\n#define A_GLSL 1\n";
+static const char EASU_PRE[]="#define FSR_EASU_F 1\nlayout(binding=0) uniform sampler2D t;\nuniform vec4 sz;\n"
+  "AF4 FsrEasuRF(AF2 p){ return textureGather(t,p,0); }\nAF4 FsrEasuGF(AF2 p){ return textureGather(t,p,1); }\nAF4 FsrEasuBF(AF2 p){ return textureGather(t,p,2); }\n";
+static const char EASU_POST[]="out vec4 o;\nvoid main(){ AU4 c0,c1,c2,c3; FsrEasuCon(c0,c1,c2,c3,sz.x,sz.y,sz.x,sz.y,sz.z,sz.w);\n"
+  "  AF3 c; FsrEasuF(c,AU2(gl_FragCoord.xy),c0,c1,c2,c3); o=vec4(c,1.0); }\n";
+static const char RCAS_PRE[]="#define FSR_RCAS_F 1\nlayout(binding=0) uniform sampler2D t;\nuniform vec4 k;\n"
+  "AF4 FsrRcasLoadF(ASU2 p){ return texelFetch(t,p,0); }\nvoid FsrRcasInputF(inout AF1 r,inout AF1 g,inout AF1 b){}\n";
+static const char RCAS_POST[]="out vec4 o;\nvoid main(){ AU4 con; FsrRcasCon(con,k.x); AF1 r,g,b;\n"
+  "  FsrRcasF(r,g,b,AU2(gl_FragCoord.xy-k.yz),con); o=vec4(r,g,b,1.0); }\n";
+static GLuint fsr_prog(const char* pre, const char* post){
+  size_t n=strlen(FSR_HEAD)+sizeof FFX_A_GLSL+strlen(pre)+sizeof FFX_FSR1_GLSL+strlen(post)+1; char* s=malloc(n);
+  snprintf(s,n,"%s%s%s%s%s",FSR_HEAD,FFX_A_GLSL,pre,FFX_FSR1_GLSL,post);
+  char err[2048]; err[0]=0; GLuint fs=compile(GL_FRAGMENT_SHADER,s,err,sizeof err); free(s);
+  if(!fs){ WARN("FSR: shader did not compile:\n%s\n",err); return 0; }
+  GLuint vs=compile(GL_VERTEX_SHADER,BLIT_VS,NULL,0); return vs? link2(vs,fs,0) : 0; }
+static int fsr_target(int i, int w, int h){
+  if(g_fsr_tex[i] && g_fsr_w[i]==w && g_fsr_h[i]==h) return 1;
+  if(g_fsr_tex[i]) glDeleteTextures(1,&g_fsr_tex[i]); else glGenFramebuffers(1,&g_fsr_fbo[i]);
+  glGenTextures(1,&g_fsr_tex[i]); glBindTexture(GL_TEXTURE_2D,g_fsr_tex[i]); glTexStorage2D(GL_TEXTURE_2D,1,GL_RGBA8,w,h);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+  glBindFramebuffer(GL_FRAMEBUFFER,g_fsr_fbo[i]); glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,g_fsr_tex[i],0);
+  g_fsr_w[i]=w; g_fsr_h[i]=h; return glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE; }
+/* 1 = drawn onto the window's (ox,oy,dw,dh); 0 = not available, the caller stretches as before */
+static int fsr_draw(GLuint tex, const float* xf, int sw, int sh, int ox, int oy, int dw, int dh){
+  if(!g_fsr_state){ g_fsr_easu=fsr_prog(EASU_PRE,EASU_POST); g_fsr_rcas= g_fsr_easu? fsr_prog(RCAS_PRE,RCAS_POST) : 0;
+    g_fsr_state= g_fsr_easu && g_fsr_rcas? 1 : -1;
+    if(g_fsr_state>0){ g_fsr_easu_sz=glGetUniformLocation(g_fsr_easu,"sz"); g_fsr_rcas_k=glGetUniformLocation(g_fsr_rcas,"k"); }
+    LOG("upscaling: AMD FSR 1 %s\n",g_fsr_state>0? "ready (EASU + RCAS)" : "not available with this driver: bilinear instead"); }
+  if(g_fsr_state<0 || sw<16 || sh<16 || sw>8192 || sh>8192) return 0;
+  if(!fsr_target(0,sw,sh) || !fsr_target(1,dw,dh)){ glBindFramebuffer(GL_FRAMEBUFFER,0); return 0; }
+  glBindVertexArray(g_scratch_vao); glActiveTexture(GL_TEXTURE0); glBindSampler(0,0);
+  /* the visible part on its own, crop and flip resolved */
+  glBindFramebuffer(GL_FRAMEBUFFER,g_fsr_fbo[0]); glViewport(0,0,sw,sh); glUseProgram(g_blit_prog); glBindTexture(GL_TEXTURE_2D,tex);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+  { static GLint xl=-2; static GLuint xp; if(xl==-2 || xp!=g_blit_prog){ xl=glGetUniformLocation(g_blit_prog,"xf"); xp=g_blit_prog; } glUniform4fv(xl,1,xf); }
+  glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+  /* EASU: enlarge to the window's size */
+  glBindFramebuffer(GL_FRAMEBUFFER,g_fsr_fbo[1]); glViewport(0,0,dw,dh); glUseProgram(g_fsr_easu); glBindTexture(GL_TEXTURE_2D,g_fsr_tex[0]);
+  { float v[4]={(float)sw,(float)sh,(float)dw,(float)dh}; glUniform4fv(g_fsr_easu_sz,1,v); } glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  /* RCAS: sharpen onto the window. Its strength is in stops: 0 = strongest, 2 = mild */
+  glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(ox,oy,dw,dh); glUseProgram(g_fsr_rcas); glBindTexture(GL_TEXTURE_2D,g_fsr_tex[1]);
+  { float v[4]={2.0f*(1.0f-(float)g_opt_fsr_sharp/100.0f),(float)ox,(float)oy,0}; glUniform4fv(g_fsr_rcas_k,1,v); } glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  return 1; }
+
+static void shader_scan_diag(void);
 /* blit a texture to the window, 16:9 letterboxed. xf = uv transform (crop/flip) */
 static void screen_quad(GLuint tex, const float* xf, int tw, int th){
+  { static int on=-1; if(on<0) on=getenv("SWR_SHADER_SCAN")!=NULL; if(on) shader_scan_diag(); }
   int ww,wh; backend_window_size(&ww,&wh);
   glBindFramebuffer(GL_FRAMEBUFFER,0); glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST);
   glDisable(GL_FRAMEBUFFER_SRGB);
@@ -2687,9 +2996,11 @@ static void screen_quad(GLuint tex, const float* xf, int tw, int th){
   glUseProgram(g_down_prog? g_down_prog : g_blit_prog); g_pipe_on=0; glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,tex); glBindSampler(0,0);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
   { static const GLint idm[4]={GL_RED,GL_GREEN,GL_BLUE,GL_ALPHA}; glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_RGBA,idm); }
+  int sw=(int)(tw*fabsf_(xf[2])+0.5f), sh=(int)(th*fabsf_(xf[3])+0.5f);
+  if(!(g_opt_upscaler==1 && !g_gles && (sw<dw || sh<dh) && fsr_draw(tex,xf,sw,sh,(ww-dw)/2,(wh-dh)/2,dw,dh))){
   if(g_down_prog){ glUniform4fv(g_down_xf,1,xf); float pxv[4]={ fabsf_(xf[2])/(float)(dw>0? dw : 1), fabsf_(xf[3])/(float)(dh>0? dh : 1), g_opt_aa? 1.0f : 0.0f, g_opt_sharp>0? (float)g_opt_sharp/100.0f : 0.0f }; glUniform4fv(g_down_px,1,pxv); }
   else { static GLint xl=-2; static GLuint xp; if(xl==-2 || xp!=g_blit_prog){ xl=glGetUniformLocation(g_blit_prog,"xf"); xp=g_blit_prog; } glUniform4fv(xl,1,xf); }
-  glBindVertexArray(g_scratch_vao); glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+  glBindVertexArray(g_scratch_vao); glDrawArrays(GL_TRIANGLE_STRIP,0,4); }
   { /* test only: SWR_TEST_BACKBUFFER=frame,frame,...:prefix writes the window's back buffer (what goes on screen,
        after the window pass) as prefix<frame>.ppm. Desktop grabs need the game in front; this does not */
     static int cfg; static const char* list; static char pre[512]; extern int g_frames; static int last=-1;
@@ -2858,6 +3169,7 @@ static void present_cpu(u32* px, int w, int h){
 static u64 st_tex_evict, st_vb_evict;
 
 static void tex_free(Tex* t){
+  aj_forget(t);
   glDeleteTextures(1,&t->id); if(t->view) glDeleteTextures(1,&t->view); if(t->pre) glDeleteTextures(1,&t->pre);
   if(t->crop){ glDeleteTextures(1,&t->crop->id); if(t->crop->view) glDeleteTextures(1,&t->crop->view); free(t->crop); }
   if(t->vol){ glDeleteTextures(1,&t->vol->id); if(t->vol->view) glDeleteTextures(1,&t->vol->view); free(t->vol); }
@@ -3005,7 +3317,7 @@ static void warm_step(void){
   if(g_worker==1){   /* compile thread available: feed it a few low priority jobs at a time */
     for(int j=0;j<wlo_n;){ if(__atomic_load_n(&wlo[j]->state,__ATOMIC_ACQUIRE)){ free(wlo[j]->own_vs); free(wlo[j]->own_fs); free(wlo[j]); wlo[j]=wlo[--wlo_n]; wq_done++;
         if(wq_done==wq_n) LOG("shaders: precompiled pack (%u programs)\n",wq_n); } else j++; }
-    while(wlo_n<8 && wq_i<wq_n){ PackEnt* e=&wq[wq_i]; WJob* j=calloc(1,sizeof *j); j->own_vs=e->vs; j->own_fs=e->fs; j->vs=e->vs; j->fs=e->fs; j->key=e->key; j->keep=0; j->sep=e->sep; j->stype= e->stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
+    while(wlo_n<(g_workers_up>2? 16 : 8) && wq_i<wq_n){ PackEnt* e=&wq[wq_i]; WJob* j=calloc(1,sizeof *j); j->own_vs=e->vs; j->own_fs=e->fs; j->vs=e->vs; j->fs=e->fs; j->key=e->key; j->keep=0; j->sep=e->sep; j->stype= e->stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
       if(!wr_push(&wq_lo,j)){ free(j); break; } e->vs=e->fs=NULL; wq_i++; wlo[wlo_n++]=j; }
     return; }
   if(g_par<=0 || !g_pcache) return;
@@ -3026,11 +3338,31 @@ static void warm_step(void){
    keyed as a draw with all-float vertex attributes, textures and render targets keys them (key2 0): integer variants
    (skinning indices, integer targets) still build at first use. A file once done is listed (name and size) in
    shader_cache/prebuilt_<tag>.txt and skipped next time, so only new or changed files cost time */
-int g_opt_prebuild;
+int g_opt_prebuild=1;
 extern int shader_program_check(const u8* code, u32 max_bytes, u32* out_len, int* type);
 void (*g_backend_status)(const char* text);   /* the window title (backend_win32.c sets it); NULL elsewhere */
 static void backend_status(const char* t){ if(g_backend_status) g_backend_status(t); }
 static int pb_no_cb(u32 idx, u32 off, u32* out){ (void)idx; (void)off; *out=0; trans_overflow=1; return 0; }   /* no GPU state yet */
+/* SWR_SHADER_SCAN=t1,t2,..: at those seconds, count the valid shader programs in GPU memory (every nvmap buffer),
+   to see whether a game has its shaders in memory before it draws with them (diagnostic) */
+extern u64 nvmap_addr(u32 h); extern u32 nvmap_size(u32 h);
+static void shader_scan_diag(void){
+  static int init, nat, next; static double at[8]; static u64 t0; static u64* seen;
+  if(!init){ init=1; const char* e=getenv("SWR_SHADER_SCAN"); t0=plat_ns(); while(e && *e && nat<8){ at[nat++]=atof(e); e=strchr(e,','); if(e) e++; } }
+  if(next>=nat || (double)(plat_ns()-t0)/1e9<at[next]) return;
+  next++; if(!seen) seen=calloc(1u<<17,8); memset(seen,0,(1u<<17)*8);
+  u64 s0=plat_ns(), bytes=0; u32 vs=0, fs=0, other=0, dup=0, bufs=0;
+  for(u32 h=1;h<8192;h++){ u64 a=nvmap_addr(h); u32 n=nvmap_size(h); if(!a || n<128) continue;
+    MemBlock b; mem_query(a,&b); if(!(b.perm&PERM_R) || a<b.addr || a-b.addr+n>b.size) continue;
+    const u8* buf=GP(a); bytes+=n; bufs++;
+    for(u64 o=0;o+128<=n;o+=4){ u32 w0; memcpy(&w0,buf+o,4); if(((w0>>5)&31)!=3 || ((w0&31)!=1 && (w0&31)!=2)) continue;
+      u32 avail= n-o>0x10000? 0x10000 : (u32)(n-o), len=0; int ty=0; if(!shader_program_check(buf+o,avail,&len,&ty)) continue;
+      u32 hl; u64 hh=shader_hash(buf+o,avail,&hl); u64 k=(hh^(u64)ty)|1; u32 i=(u32)(k^(k>>31))&0x1FFFF;
+      while(seen[i] && seen[i]!=k) i=(i+1)&0x1FFFF;
+      if(seen[i]){ dup++; continue; } seen[i]=k; if(ty==1) vs++; else if(ty==5) fs++; else other++; } }
+  LOG("shader scan at %.0f s: %u vertex + %u pixel + %u other programs in %u buffers, %.0f MB of GPU memory (%u duplicates); %llu shaders used by draws so far; %.0f ms\n",
+      at[next-1],vs,fs,other,bufs,bytes/1048576.0,dup,(unsigned long long)st_sh_new,(plat_ns()-s0)/1e6); }
+
 static void prebuild_shaders(void){
   if(!g_opt_prebuild || g_gles || g_sep!=1) return;
   pcache_init(); if(g_pcache<=0){ LOG("shaders: pre-build needs program binaries, which this driver lacks\n"); return; }
@@ -3068,7 +3400,7 @@ static void prebuild_shaders(void){
       if(c){ si=c->si; src=malloc(strlen(c->src)+1); strcpy(src,c->src); }
       else { trans_ndep=0; trans_overflow=0; g_shader_cb_read=pb_no_cb; src=shader_to_glsl(buf+o,avail,stage,&si); g_shader_cb_read=sh_cb_read;
         if(!src || si.unsupported){ free(src); failed++; continue; }
-        src=sh_post(src,stage); translated_save(tk,&si,src); }   /* translated_save skips one that needed constant buffers */
+        src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src); translated_save(tk,&si,src); }   /* translated_save skips one that needed constant buffers */
       if(stage==ST_VS) src=dlg_vs_xfb(src);
       Sh* s=calloc(1,sizeof *s); s->stage=stage; s->hash=h; s->src=src; u64 key=sh_key(s);
       char bp[200]; snprintf(bp,sizeof bp,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
@@ -3094,6 +3426,73 @@ static void prebuild_shaders(void){
   backend_status(NULL); free(seen); free(fl);
   LOG("shaders: pre-build: %u files, %u programs: %u compiled now (%.1f s), %u had a binary, %u failed; %.1f s in all\n",
       filesdone,progs,built,compile_ns/1e9,had,failed,(plat_ns()-t0)/1e9); }
+/* ============================================================ shader pre-build from GPU memory
+   ([Graphics] prebuild_shaders=1, the default). Metroid Prime 4 keeps its shaders compressed in MaterialArchive.arc (no
+   NVN programs to find in the files, unlike Dread's romfs/system/shd), but unpacks them into GPU memory at boot: 662
+   programs by 20 s into the intro, when draws had used 10. A scanner thread looks through every GPU buffer every few
+   seconds and copies each new program; the GL thread translates a few per loop (time budget, so no hitch); the compile
+   threads build them and the programs are kept ready (warm stages) and saved as binaries. So shaders are compiled
+   before the game first draws with them, during the intro, and on later starts they all load from the cache.
+   Translated as a draw with float attributes and targets would (key2 0), as prebuild_shaders does: an integer variant
+   still compiles at its first use */
+typedef struct { u8* code; u32 avail; int stage; } MemProg;
+static MemProg* g_mp; static u32 g_mp_n, g_mp_cap, g_mp_next; static PMutex g_mp_m; static int g_mp_on=-1;
+static u32 g_mp_found, g_mp_built, g_mp_had, g_mp_failed, g_mp_logged; static u64 g_mp_ns;
+typedef struct { WJob* j; u64 key; int stage; } MpJob;
+static MpJob g_mpj[64]; static int g_mpj_n;
+static void mp_scan_thread(void* arg){ plat_diag_role("shader-scan"); (void)arg; plat_thread_low_priority();
+  u64* seen=calloc(1u<<17,8); u32 nseen=0; if(!seen) return;
+  for(int pass=0;;pass++){
+    for(u32 h=1;h<8192;h++){ u64 a=nvmap_addr(h); u32 n=nvmap_size(h); if(!a || n<128) continue;
+      MemBlock b; mem_query(a,&b); if(!(b.perm&PERM_R) || a<b.addr || a-b.addr+n>b.size) continue;
+      const u8* buf=GP(a);
+      for(u64 o=0;o+128<=n;o+=4){ u32 w0; memcpy(&w0,buf+o,4); if(((w0>>5)&31)!=3 || ((w0&31)!=1 && (w0&31)!=2)) continue;
+        u32 avail= n-o>0x10000? 0x10000 : (u32)(n-o), len=0; int ty=0; if(!shader_program_check(buf+o,avail,&len,&ty)) continue;
+        int stage= ty==1? ST_VS : ty==5? ST_FS : -1; if(stage<0) continue;
+        u32 hl; u64 hh=shader_hash(buf+o,avail,&hl); u64 k=(hh^(u64)(stage+1))|1; u32 i=(u32)(k^(k>>31))&0x1FFFF;
+        while(seen[i] && seen[i]!=k) i=(i+1)&0x1FFFF;
+        if(seen[i] || nseen>=100000) continue; seen[i]=k; nseen++;
+        u8* copy=malloc(avail); if(!copy) continue; memcpy(copy,buf+o,avail);
+        pm_lock(&g_mp_m); if(g_mp_n==g_mp_cap){ g_mp_cap= g_mp_cap? g_mp_cap*2 : 1024; g_mp=realloc(g_mp,g_mp_cap*sizeof *g_mp); }
+        g_mp[g_mp_n++]=(MemProg){copy,avail,stage}; pm_unlock(&g_mp_m); } }
+    plat_sleep_ns(pass<10? 2000000000ll : 5000000000ll); } }
+static void mem_prebuild_step(void){
+  if(g_mp_on<0){ g_mp_on= g_opt_prebuild && !g_gles && g_sep==1 && g_worker==1 && g_pcache>0 && !getenv("SWR_NO_MEM_PREBUILD");
+    if(g_mp_on){ pm_init(&g_mp_m); if(plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0; }
+    LOG("shaders: pre-build from GPU memory %s\n",g_mp_on? "on (shaders are built as soon as the game loads them, before it draws with them)" : "off"); }
+  if(!g_mp_on) return;
+  /* finished compiles: keep the program ready for the game's first draw */
+  for(int k=0;k<g_mpj_n;){ int st=__atomic_load_n(&g_mpj[k].j->state,__ATOMIC_ACQUIRE); if(!st){ k++; continue; }
+    WJob* j=g_mpj[k].j; if(st==1 && j->prog){ warm_stage_put(g_mpj[k].key,j->prog,glGetUniformLocation(j->prog,g_mpj[k].stage==ST_VS?"swr_vp":"swr_at")); g_mp_built++; } else g_mp_failed++;
+    free(j->own_vs); free(j); g_mpj[k]=g_mpj[--g_mpj_n]; }
+  u64 t0=plat_ns();
+  while(g_mpj_n<64 && plat_ns()-t0<1500000ull){   /* at most 1.5 ms of translating per loop */
+    pm_lock(&g_mp_m); MemProg mp= g_mp_next<g_mp_n? g_mp[g_mp_next++] : (MemProg){NULL,0,0}; pm_unlock(&g_mp_m);
+    if(!mp.code) break;
+    g_mp_found++; int stage=mp.stage; u32 hl; u64 h=shader_hash(mp.code,mp.avail,&hl);
+    ShaderInfo si; memset(&si,0,sizeof si); g_sh_bind= stage==ST_VS? 0 : 4;
+    u64 tk=translated_key(h,stage,0,&si); Translated* c=translated_get(tk); char* src=NULL;
+    if(c){ si=c->si; src=malloc(strlen(c->src)+1); strcpy(src,c->src); }
+    else { trans_ndep=0; trans_overflow=0; g_shader_cb_read=pb_no_cb; src=shader_to_glsl(mp.code,mp.avail,stage,&si); g_shader_cb_read=sh_cb_read;
+      if(!src || si.unsupported){ /* why, by the first instruction the translator lacks: logged with the summary */
+        static char why[16][24]; static u32 nwhy[16]; const char* w= !src? "no GLSL" : si.first_unsupported; char op[24]; snprintf(op,sizeof op,"%.*s",(int)strcspn(w," "),w);
+        int k=0; for(;k<16 && why[k][0] && strcmp(why[k],op);k++); if(k<16){ if(!why[k][0]) snprintf(why[k],24,"%s",op); nwhy[k]++; }
+        if(getenv("SWR_TRACE_PREBUILD") || g_mp_failed%50==49){ char l[400]; int o=0; for(int q=0;q<16 && why[q][0];q++) o+=snprintf(l+o,sizeof l-o," %s:%u",why[q],nwhy[q]); LOG("shaders: pre-build: not translated, by first missing instruction:%s\n",l); }
+        free(src); free(mp.code); g_mp_failed++; continue; }
+      src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src); translated_save(tk,&si,src); }
+    free(mp.code);
+    if(stage==ST_VS) src=dlg_vs_xfb(src);
+    Sh tmp; memset(&tmp,0,sizeof tmp); tmp.stage=stage; tmp.hash=h; tmp.src=src; u64 key=sh_key(&tmp);
+    pack_add_sh(key,&tmp);
+    char bp[200]; snprintf(bp,sizeof bp,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
+    WJob* j=calloc(1,sizeof *j); j->vs=src; j->own_vs=src; j->key=key; j->keep=1; j->sep=1; j->stype= stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
+    { FILE* t=fopen(bp,"rb"); if(t){ fclose(t); j->try_bin=1; snprintf(j->bin_path,sizeof j->bin_path,"%s",bp); g_mp_had++; } }   /* built before: the thread loads it */
+    if(!wr_push(&wq_lo,j)){ free(src); free(j); break; }
+    g_mpj[g_mpj_n++]=(MpJob){j,key,stage}; }
+  g_mp_ns+=plat_ns()-t0;
+  if(g_mp_found && g_mp_found==g_mp_built+g_mp_failed && g_mp_logged!=g_mp_found){ g_mp_logged=g_mp_found;
+    LOG("shaders: pre-build from GPU memory: %u programs ready (%u from the cache), %u failed; %.0f ms of translating on the GL thread\n",g_mp_built,g_mp_had,g_mp_failed,g_mp_ns/1e6); } }
+
 static FILE* g_rf; static u64 g_rf_t0;
 static u64 g_fr_t0, g_fr_max; static int g_fr_slow; static u64 g_fr_shnew;
 /* ---- dynamic res: move every RT to the new scale with a GPU copy */
@@ -3101,8 +3500,8 @@ static u64 g_fr_t0, g_fr_max; static int g_fr_slow; static u64 g_fr_shnew;
 static GLuint g_rs_ubo;
 
 static void rs_update(void){ extern int g_rs_binding;
-  if(!g_rs_ubo){ GLint mx=84; glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS,&mx); if(mx<2) return; g_rs_binding=mx-1; glGenBuffers(1,&g_rs_ubo); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferData(GL_UNIFORM_BUFFER,16,NULL,GL_DYNAMIC_DRAW); }
-  float v[4]={1.0f/g_scale,1.0f/g_scale,g_scale,0}; glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferSubData(GL_UNIFORM_BUFFER,0,16,v); glBindBufferBase(GL_UNIFORM_BUFFER,(GLuint)g_rs_binding,g_rs_ubo); }
+  if(!g_rs_ubo){ GLint mx=84; glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS,&mx); if(mx<2) return; g_rs_binding=mx-1; glGenBuffers(1,&g_rs_ubo); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferData(GL_UNIFORM_BUFFER,32,NULL,GL_DYNAMIC_DRAW); }
+  float v[8]={1.0f/g_scale,1.0f/g_scale,g_scale,0}; memcpy(&v[4],g_rs_mask,8); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferSubData(GL_UNIFORM_BUFFER,0,32,v); glBindBufferBase(GL_UNIFORM_BUFFER,(GLuint)g_rs_binding,g_rs_ubo); }
 
 static void rt_rescale(float ns){
   float old=g_scale; if(ns==old) return;
@@ -3191,7 +3590,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
     g_par=0; int vl=0; GLint n=0; glGetIntegerv(GL_NUM_EXTENSIONS,&n); typedef const GLubyte* (APIENTRY*GSI2)(GLenum,GLuint); GSI2 gsi=(GSI2)backend_gl_proc("glGetStringi");
     for(GLint k=0;k<n && gsi;k++){ const char* e=(const char*)gsi(GL_EXTENSIONS,(GLuint)k); if(!e) continue;
       if(!strcmp(e,"GL_KHR_parallel_shader_compile")||!strcmp(e,"GL_ARB_parallel_shader_compile")) g_par=1;
-      if(!g_gles && !strcmp(e,"GL_KHR_texture_compression_astc_ldr")) g_has_astc=1;
+      if(!g_gles && !strcmp(e,"GL_KHR_texture_compression_astc_ldr") && getenv("SWR_ASTC_DRIVER")) g_has_astc=1;   /* desktop drivers emulate it on the GL thread */
       if(!strcmp(e,"GL_ARB_shader_viewport_layer_array")) vl|=1; if(!strcmp(e,"GL_AMD_vertex_shader_layer")) vl|=2; if(!strcmp(e,"GL_NV_viewport_array2")) vl|=4; }
     { extern int g_vs_layer_ext; g_vs_layer_ext= g_gles? 0 : (vl&1)? 1 : (vl&2)? 2 : (vl&4)? 3 : 0;
       LOG("gpu: render target layer from the vertex shader: %s\n",g_vs_layer_ext==1? "ARB_shader_viewport_layer_array" : g_vs_layer_ext==2? "AMD_vertex_shader_layer" : g_vs_layer_ext==3? "NV_viewport_array2" : "not available (drawn to layer 0)"); }
@@ -3227,7 +3626,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
   unsigned work_trace_rows=0;
   g_gl=1; g_gl_ready=1;
   for(;;){
-    warm_step();
+    warm_step(); mem_prebuild_step();
     { /* loading screens etc: log how long we went without a new image */
       static u64 lp_t, lp_f; u64 tn=plat_ns(); if(g_frame!=lp_f){ if(lp_t && tn-lp_t>1500000000ull && g_rf){ fprintf(g_rf,"   -> %.1f s without a new image (loading or waiting)\n",(double)(tn-lp_t)/1e9); fflush(g_rf); } lp_f=g_frame; lp_t=tn; } }
     { static u64 next_st; u64 now=plat_ns(); if(!next_st) next_st=now+5000000000ull;
@@ -3291,10 +3690,12 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
     Work w; if(!q_pop(&w,to_)){ lsfg_pump(); continue; }
     u64 t_busy0=plat_ns(),work_cpu=work_trace?plat_thread_cpu_ns():0;u32 work_frame=g_frame;
     switch(w.kind){
-      case WK_SUBMIT: g_submit_epoch++; ww_poll(); { extern volatile u64 g_gpu_sub_ns; static u32 fr=~0u; if(fr!=g_frame || !g_gpu_sub_ns){ fr=g_frame; g_gpu_sub_ns=w.sub_ns; } }   /* stamp the whole frame with the time of its first submit */ gpu_submit_now(w.ent,w.n,w.syncpt); cs_kick_async(); free(w.ent); cs_submit_done(w.syncpt,w.incs); break;
-      case WK_PRESENT_CPU: trace_note("PRESENT CPU image %dx%d\n",w.w,w.h); present_cpu(w.px,w.w,w.h); free(w.px); g_frame++; gpu_evict_step(); frame_stats(); trace_frame(); break;
+      case WK_SUBMIT: g_submit_epoch++; ww_poll(); { extern volatile u64 g_gpu_sub_ns; static u32 fr=~0u; if(fr!=g_frame || !g_gpu_sub_ns){ fr=g_frame; g_gpu_sub_ns=w.sub_ns; } }   /* stamp the whole frame with the time of its first submit */ { extern u64 guest_ns(void); u64 q0=guest_ns(), p0=plat_ns(); gpu_submit_now(w.ent,w.n,w.syncpt); u64 pd=plat_ns()-p0; static int said;
+        if(said<60 && (q0-w.sub_ns>30000000ull || pd>30000000ull)){ said++; LOG("gpu: submit on syncpoint %u waited %.1f ms in the queue, took %.1f ms (%u entries)\n",w.syncpt,(q0-w.sub_ns)/1e6,pd/1e6,w.n); } }
+        cs_kick_async(); free(w.ent); cs_submit_done(w.syncpt,w.incs); break;
+      case WK_PRESENT_CPU: trace_note("PRESENT CPU image %dx%d\n",w.w,w.h); present_cpu(w.px,w.w,w.h); free(w.px); g_frame++; aj_drain(); gpu_evict_step(); frame_stats(); trace_frame(); break;
       case WK_PRESENT_ADDR: if(!present_addr(w.addr,w.w,w.h)){ extern void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, u32* out);
-          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; dlg_frame(); gpu_evict_step(); frame_stats(); trace_frame(); break;
+          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; dlg_frame(); aj_drain(); gpu_evict_step(); frame_stats(); trace_frame(); break;
       case WK_SYNC: pm_lock(&g_ql);__atomic_store_n(w.done,1,__ATOMIC_RELEASE);pc_broadcast(&g_frame_consumed_cv);pm_unlock(&g_ql);break;
       case WK_DUMP: dump_rts(); g_tr_arm=1; break;
       case WK_SHOT: do_screenshot(w.path[0]? w.path : NULL); __atomic_store_n(&g_shot_done,w.n,__ATOMIC_SEQ_CST); break;
@@ -3525,8 +3926,10 @@ void gpu_gl_dispatch(GpuChannel* ch, const u32* q, u64 code){
   /* ssbos */
   static GLuint sb[16]; u64 sa[16]; u32 ss[16];
   for(int i=0;i<p->si.ngbuf && i<16;i++){ if(!sb[i]) glGenBuffers(1,&sb[i]);
-    u32 v[3]={0,0,0}; cs_cb_read(0,p->si.gbuf_cbuf_off[i],&v[0]); cs_cb_read(0,p->si.gbuf_cbuf_off[i]+4,&v[1]); cs_cb_read(0,p->si.gbuf_cbuf_off[i]+8,&v[2]);
-    sa[i]=((u64)v[1]<<32)|v[0]; ss[i]=v[2]; if(!ss[i]) ss[i]=16; if(ss[i]>(16u<<20)) ss[i]=16u<<20; ss[i]=(ss[i]+3)&~3u;
+    u32 v[3]={0,0,0}, gb=p->si.gbuf_cbuf_idx[i]; cs_cb_read(gb,p->si.gbuf_cbuf_off[i],&v[0]); cs_cb_read(gb,p->si.gbuf_cbuf_off[i]+4,&v[1]); cs_cb_read(gb,p->si.gbuf_cbuf_off[i]+8,&v[2]);
+    sa[i]=((u64)v[1]<<32)|v[0]; ss[i]= p->si.gbuf_sized[i]? v[2] : 0;
+    if(sa[i] && !p->si.gbuf_sized[i]){ extern u64 gmmu_run(u64,u64,u64*); u64 cpu=0; u64 run=gmmu_run(sa[i],1u<<20,&cpu); ss[i]= run>16? (u32)run : 16; }
+    if(!ss[i]) ss[i]=16; if(ss[i]>(16u<<20)) ss[i]=16u<<20; ss[i]=(ss[i]+3)&~3u;
     { GLuint gsb; u32 gso; if(sa[i] && g_cs_any && cs_gpu_src(sa[i],ss[i],&gsb,&gso)){
         glBindBuffer(GL_COPY_WRITE_BUFFER,sb[i]); glBufferData(GL_COPY_WRITE_BUFFER,ss[i],NULL,GL_DYNAMIC_COPY);
         glBindBuffer(GL_COPY_READ_BUFFER,gsb); glCopyBufferSubData(GL_COPY_READ_BUFFER,GL_COPY_WRITE_BUFFER,gso,0,ss[i]);
