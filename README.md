@@ -35,6 +35,7 @@ Everything that changed is listed below.
 - [Known issues](#known-issues)
 - [Troubleshooting](#troubleshooting)
 - [Advanced switches](#advanced-switches)
+- [Building from source](#building-from-source)
 - [Credits](#credits)
 - [Licences](#licences)
 
@@ -308,6 +309,21 @@ Environment variables for testing and for turning individual fixes off if one ev
 | `SWR_SYNC_SHADERS=1` | draws wait for their shaders (the launcher default, `wait_for_shaders=1`) |
 | `SWR_STALL_STACK=1` | log the GL thread's stack on calls over 15 ms |
 
+## Building from source
+
+The source for the runtime, recompiler and AppImage packaging is in this repository (no Nintendo files: no game code,
+no RomFS, no keys, no generated C). Developer notes, the bring-up log and more build options are in
+[DEVELOPMENT.md](DEVELOPMENT.md).
+
+```bash
+bash linux/install_deps.sh
+bash linux/setup_and_build_runtime.sh
+bash linux/make_appimage.sh
+```
+
+`make_appimage.sh` produces `linux/dist/Metroid_Prime_4_Beyond-x86_64.AppImage`. To run from the source tree without
+the AppImage instead: `bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]`, then `bash linux/run.sh`.
+
 ## Credits
 
 - **yozander2009-stack** and the Metroid Dread Recomp contributors: the project this is forked from
@@ -320,8 +336,9 @@ Environment variables for testing and for turning individual fixes off if one ev
 
 ## Licences
 
-The released program is distributed under **GPL-3.0**, because it contains the ScarletNX renderer; each source file
-keeps its own licence (Apache-2.0 and MIT code is GPL-3.0-compatible). The licence texts are inside the AppImage under
+The released program is distributed under **GPL-3.0** (`LICENSE`), because it contains the ScarletNX renderer; its
+source is this repository. Each source file keeps its own licence (`LICENSE.txt` and `NOTICE.txt` for SwitchRecomp's
+Apache-2.0; Apache-2.0 and MIT code is GPL-3.0-compatible). The licence texts are also inside the AppImage under
 `usr/share/metroid-beyond/licenses`.
 
 *Metroid Prime 4: Beyond* and *Metroid Dread* are © Nintendo. This project is not affiliated with or endorsed by

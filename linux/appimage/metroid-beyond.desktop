@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Metroid Prime 4 Beyond
+Comment=Metroid Prime 4 Beyond recompiled for PC: sets up and plays your own copy of the game
+Exec=metroid-beyond
+Icon=metroid-beyond
+Categories=Game;
+Terminal=false
+StartupWMClass=MetroidBeyond
