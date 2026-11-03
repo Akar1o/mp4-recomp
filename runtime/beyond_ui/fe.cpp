@@ -249,6 +249,12 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
             std::string p = pick_folder(g_hwnd, "Choose the extracted update folder"); g_update = p; set("setup_update", p); }
         help_text("The game needs its latest update. An update file is applied to the game file (choose the game as a file too); an update folder's "
                   "ExeFS is used and its RomFS files are layered over the game's. Every file is then checked against the supported build's file list.");
+        // an update file patches the game file's RomFS byte ranges: it cannot be applied to an extracted folder
+        bool upd_needs_file = !g_update.empty() && file_exists(g_update) && !(file_exists(g_base));
+        if (upd_needs_file) { ImGui::Indent(S(18)); ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(C_RED_HI));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - S(18));
+            ImGui::TextUnformatted("The update file is a patch over the game file: choose the game as a file too (Game file: your .xci or .nsp), not an extracted folder.");
+            ImGui::PopTextWrapPos(); ImGui::PopStyleColor(); ImGui::Unindent(S(18)); }
         if (!g_old.empty()) {
             section("BRING OVER FROM YOUR EXISTING INSTALLATION");
             const OldInstall& o = g_old[0];
@@ -259,7 +265,7 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
             if (o.cache_bytes) row_bool("##mc", fmt("Shader caches (%.0f MB, fewer first-time stutters)", o.cache_bytes / 1048576.0).c_str(), &g_mig_caches);
         }
         ImGui::Dummy({1, S(16)});
-        ImGui::BeginDisabled(g_base.empty());
+        ImGui::BeginDisabled(g_base.empty() || upd_needs_file);
         if (big_button("##go", "START SETUP", {S(360), S(68)})) {
             g_job = SetupJob(); g_job.base = g_base; g_job.update = g_update; g_job.t0 = ImGui::GetTime();
             if (setup_start(g_job)) g_ss = SS_RUNNING; else g_ss = SS_FAILED;
