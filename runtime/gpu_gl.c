@@ -3853,23 +3853,39 @@ static const char* mp_why_unseen(u64 h, int stage){ static char w[96]; if(g_mp_o
   if(at<0){ snprintf(w,sizeof w,"pre-build never saw it: not found in GPU memory yet"); static int off=-1; if(off<0) off=getenv("SWR_NO_SCAN_WAKE")!=NULL; if(!off) __atomic_store_n(&g_mp_wake,1,__ATOMIC_RELEASE); }
   else snprintf(w,sizeof w,"pre-build never saw it: found %.1f s ago, %d ahead of it to translate",(plat_ns()-t)/1e9,(int)at-(int)nx);
   return w; }
+/* A full pass reads every GPU buffer (about 300 MB in play, 110 ms on a Ryzen 7900X3D) and pushes the game's data out of
+   the CPU caches: done every 5 s, that showed as a hitch every 5 s on CPUs with less cache. After the first passes a
+   buffer is read again only when it is new, has held shaders, or its fingerprint (8 bytes of every 4 KB) changed; a
+   full pass still runs every 12th pass (about a minute) and whenever a draw found a shader the scanner had missed.
+   SWR_SCAN_FULL=1: every pass full, as before */
+static u64 mp_fingerprint(const u8* p, u32 n){ u64 h=n; for(u32 o=0;o+8<=n;o+=4096){ u64 w; memcpy(&w,p+o,8); h=(h^w)*0x100000001B3ull; }
+  u64 w; memcpy(&w,p+n-8,8); return (h^w)*0x100000001B3ull; }
 static void mp_scan_thread(void* arg){ plat_diag_role("shader-scan"); (void)arg; plat_thread_low_priority();
   u64* seen=calloc(1u<<17,8); u32 nseen=0; if(!seen) return;
+  static u64 b_addr[8192], b_fp[8192]; static u32 b_size[8192]; static u8 b_had[8192];
+  int all=getenv("SWR_SCAN_FULL")!=NULL, woke=0;
   for(int pass=0;;pass++){
+    int full= all || woke || pass<10 || pass%12==0;
+    u64 ts=plat_ns(), bytes=0, skipped=0; u32 nbuf=0, nfound0=nseen;
     for(u32 h=1;h<8192;h++){ u64 a=nvmap_addr(h); u32 n=nvmap_size(h); if(!a || n<128) continue;
       MemBlock b; mem_query(a,&b); if(!(b.perm&PERM_R) || a<b.addr || a-b.addr+n>b.size) continue;
-      const u8* buf=GP(a);
+      const u8* buf=GP(a); u64 fp=mp_fingerprint(buf,n);
+      if(!full && !b_had[h] && b_addr[h]==a && b_size[h]==n && b_fp[h]==fp){ skipped+=n; continue; }
+      b_addr[h]=a; b_size[h]=n; b_fp[h]=fp; bytes+=n; nbuf++;
       for(u64 o=0;o+128<=n;o+=4){ u32 w0; memcpy(&w0,buf+o,4); if(((w0>>5)&31)!=3 || ((w0&31)!=1 && (w0&31)!=2)) continue;
         u32 avail= n-o>0x10000? 0x10000 : (u32)(n-o), len=0; int ty=0; if(!shader_program_check(buf+o,avail,&len,&ty)) continue;
-        int stage= ty==1? ST_VS : ty==5? ST_FS : -1; if(stage<0) continue;
+        int stage= ty==1? ST_VS : ty==5? ST_FS : -1; if(stage<0) continue; b_had[h]=1;
         u32 hl; u64 hh=shader_hash(buf+o,avail,&hl); u64 k=(hh^(u64)(stage+1))|1; u32 i=(u32)(k^(k>>31))&0x1FFFF;
         while(seen[i] && seen[i]!=k) i=(i+1)&0x1FFFF;
         if(seen[i] || nseen>=100000) continue; seen[i]=k; nseen++;
         u8* copy=malloc(avail); if(!copy) continue; memcpy(copy,buf+o,avail);
         pm_lock(&g_mp_m); if(g_mp_n==g_mp_cap){ g_mp_cap= g_mp_cap? g_mp_cap*2 : 1024; g_mp=realloc(g_mp,g_mp_cap*sizeof *g_mp); }
         g_mp[g_mp_n++]=(MemProg){copy,avail,stage,hh,plat_ns()}; pm_unlock(&g_mp_m); } }
+    if(pass<4 || pass%60==0 || getenv("SWR_TRACE_SCAN")) LOG("shaders: scan pass %d (%s%s): %u buffers, %.0f MB read, %.0f MB unchanged, %.1f ms, %u new\n",pass,full? "full" : "changed",woke? ", woken" : "",
+      nbuf,bytes/1048576.0,skipped/1048576.0,(plat_ns()-ts)/1e6,nseen-nfound0);
+    woke=0;
     { u64 until=plat_ns()+(pass<10? 2000000000ull : 5000000000ull);   /* or sooner when a draw found a shader it had missed */
-      while(plat_ns()<until && !__atomic_exchange_n(&g_mp_wake,0,__ATOMIC_ACQ_REL)) plat_sleep_ns(20000000); } } }
+      while(plat_ns()<until){ if(__atomic_exchange_n(&g_mp_wake,0,__ATOMIC_ACQ_REL)){ woke=1; break; } plat_sleep_ns(20000000); } } } }
 static void mem_prebuild_step(void){
   if(g_mp_on<0){ g_mp_on= g_opt_prebuild && !g_gles && g_sep==1 && g_worker==1 && g_pcache>0 && !getenv("SWR_NO_MEM_PREBUILD");
     if(g_mp_on){ pm_init(&g_mp_m); if(plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0; }

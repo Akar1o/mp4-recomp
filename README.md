@@ -182,6 +182,10 @@ from the same save), traced to a root cause and checked again in the game.
 - **Driver submits cut from 125 to 15 per frame.** Bloom and exposure mip chains were recopied in full each time one more
   level was drawn (about 128 copies a frame). Only changed levels are copied now.
 - **No `glFlush` per occlusion-query report.**
+- **A slow frame every 5 seconds.** The background shader scan reread all of the game's GPU memory (about 300 MB) every
+  5 s, pushing the game's data out of the CPU cache, and on Linux it ran at full priority. It now rereads only buffers
+  that changed or hold shaders (about 70 MB, 24 ms instead of 110 ms on the test machine), with a full pass about once a
+  minute or when a draw needs a shader it missed, and background threads run at a lower priority on Linux.
 - **Default resolution 1×.** The launcher's auto-settings no longer pick 2× on high-end cards.
 - **VSync on by default** on Linux: frames reaching the monitor wrong fell from 59 to 1–2 of 3600.
 

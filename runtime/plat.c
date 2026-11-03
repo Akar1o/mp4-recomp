@@ -501,7 +501,16 @@ void plat_sleep_ns(i64 ns){ if(ns<=0){ sched_yield(); return; } struct timespec 
 
 void plat_yield(void){ sched_yield(); }
 
+/* Linux: a nice value is per thread, so this lowers only the calling one (the shader scanner, the cache writer and,
+   with low_priority_shader_compiler, the compile threads): they get the CPU the game's threads leave. It was a no-op,
+   so the scanner competed with the game at full priority */
+#ifdef __linux__
+#include <sys/resource.h>
+#include <sys/syscall.h>
+void plat_thread_low_priority(void){ setpriority(PRIO_PROCESS,(id_t)syscall(SYS_gettid),10); }
+#else
 void plat_thread_low_priority(void){ }
+#endif
 
 void plat_thread_high_priority(void){ }
 
