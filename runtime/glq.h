@@ -14,4 +14,10 @@ void glq_finish_all(void);                  /* block until the GL thread drained
 void glq_read_pixels_pbo(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum t, uintptr_t off);   /* with a pack buffer bound, never waits */
 void glq_get_tex_image_pbo(GLenum tg, GLint lv, GLenum f, GLenum t, uintptr_t off);
 void glq_compressed_sub_pbo(int is3d, GLenum tg, GLint lv, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLenum f, GLsizei n, uintptr_t off);
+/* samples-passed queries from a pool of slots made on the GL thread: op 0 begin slot, 1 end, 2 copy slot's result
+   into buffer buf at off (GL_QUERY_BUFFER: the GPU writes it when ready, nothing waits) */
+void glq_occl(int op, int slot, GLuint buf, uintptr_t off);
+/* a game program's swr_vp (which 0) or swr_at (1) vec4, set by name: the GL thread looks the location up at the first set
+   and keeps it, so the GPU thread never waits for a glGetUniformLocation round trip */
+void glq_prog_uniform_named(GLuint prog, int which, const float* v);
 #endif

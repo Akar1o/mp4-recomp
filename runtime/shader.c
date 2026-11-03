@@ -9,6 +9,7 @@
 #include <stdarg.h>
 
 int g_glsl_version=440;
+int g_gbuf_max=8;
 int g_vs_layer_ext=1;   /* 1 ARB_shader_viewport_layer_array, 2 AMD_vertex_shader_layer, 3 NV_viewport_array2, 0 none */
 int g_glsl_es=0;
 int g_rs_binding=83;   /* binding of the res-scale UBO, set by gpu_gl */   /* GLSL ES 3.20 (Android) */
@@ -169,6 +170,7 @@ typedef struct {
   u8 wtag[256];        /* 1: reg = IPA(position.w), 2: reg = RCP of that (same block only) */
   int tag_r, tag_v;    /* label set by the current instruction */
   int nest;            /* structured mode: inside an if, so don't label anything (doesn't dominate the rest) */
+  const char* gs_vtx;  /* geometry stage: the input vertex an ALD reads (its vertex register) */
 } Ctx;
 #define IDX_OK(i) ((i)>=11 && ((i)-10)%4!=0)
 
@@ -217,7 +219,7 @@ static u8 gcand(Ctx* c, u32 idx, u32 off){ if(off&3) return 0;
 static u8 gbuf_tag(Ctx* c, u64 w){ return gcand(c,cb_idx(w),cb_off(w)); }
 static int gbuf_slot(Ctx* c, u8 t){ if(!t) return -1; u32 idx=c->gcand_idx[t-1], off=c->gcand_off[t-1]; ShaderInfo* si=c->si;
   for(int i=0;i<si->ngbuf;i++) if(si->gbuf_cbuf_off[i]==off && si->gbuf_cbuf_idx[i]==idx) return i;
-  if(si->ngbuf>=(c->stage==ST_CS? 16 : 8)) return -1;
+  if(si->ngbuf>=(c->stage==ST_CS? 16 : g_gbuf_max)) return -1;
   u32 lo=0x110, hi= c->stage==ST_CS? 0x410 : 0x210; int i=si->ngbuf++;
   si->gbuf_cbuf_off[i]=off; si->gbuf_cbuf_idx[i]=(u8)idx; si->gbuf_sized[i]=(u8)(idx==0 && off>=lo && off<hi && !(off&15)); return i; }
 
@@ -260,9 +262,23 @@ static const char* bop(u32 op, const char* a, const char* b){
   else if(!strcmp(b,"(!true)")){ if(op==0) return "false"; if(op==1||op==2) return a; }                   /* !PT */
   switch(op){ case 0: return T("(%s && %s)",a,b); case 1: return T("(%s || %s)",a,b); case 2: return T("(%s != %s)",a,b); } return a; }
 
+/* video operand select: 0-3 byte, 4-5 halfword, else the whole word; signed ones sign-extend */
+static const char* vsel(const char* v, u32 sel, int sgn){
+  if(sel<4) return sgn? T("uint(bitfieldExtract(int(%s),%u,8))",v,sel*8) : T("((%s >> %uu) & 0xFFu)",v,sel*8);
+  if(sel<6) return sgn? T("uint(bitfieldExtract(int(%s),%u,16))",v,(sel-4)*16) : T("((%s >> %uu) & 0xFFFFu)",v,(sel-4)*16);
+  return v; }
 /* ============================================================ attributes */
+/* geometry stage key (ShaderInfo.attr_int_mask, set by gpu_gl.c): input primitive class in bits 0-3 (0 points,
+   1 lines, 2 triangles, 3 lines with adjacency, 4 triangles with adjacency), the vertex stage's outputs from bit 4 */
+static u32 gs_nverts(u32 cls){ static const u8 n[5]={1,2,3,4,6}; return cls<5? n[cls] : 3; }
 static char* attr_read(Ctx* c, u32 addr, int is_output){
   u32 comp=(addr>>2)&3;
+  if(c->stage==ST_GS){ const char* v= c->gs_vtx? c->gs_vtx : "0";
+    if(is_output && addr>=0x70 && addr<0x80) return T("floatBitsToUint(g_pos.%c)","xyzw"[comp]);
+    if(!is_output){
+      if(addr>=0x80 && addr<0x280){ u32 i=(addr-0x80)>>4; c->in_used[i]=1; return T("floatBitsToUint(in_attr%u[%s].%c)",i,v,"xyzw"[comp]); }
+      if(addr>=0x70 && addr<0x80) return T("floatBitsToUint(gl_in[%s].gl_Position.%c)",v,"xyzw"[comp]);
+      if(addr==0x60) return "uint(gl_PrimitiveIDIn)"; } }
   if(addr>=0x80 && addr<0x280){ u32 i=(addr-0x80)>>4;
     if(is_output){ c->out_used[i]=1; return T("floatBitsToUint(out_attr%u.%c)",i,"xyzw"[comp]); }
     c->in_used[i]=1;
@@ -289,7 +305,8 @@ static char* attr_read(Ctx* c, u32 addr, int is_output){
 static void attr_write(Ctx* c, u32 addr, const char* val){
   u32 comp=(addr>>2)&3;
   if(addr>=0x80 && addr<0x280){ u32 i=(addr-0x80)>>4; c->out_used[i]=1; emitl(c,"out_attr%u.%c = uintBitsToFloat(%s);",i,"xyzw"[comp],val); return; }
-  if(addr>=0x70 && addr<0x80){ emitl(c,"gl_Position.%c = uintBitsToFloat(%s);","xyzw"[comp],val); return; }
+  if(addr>=0x70 && addr<0x80){ emitl(c,"%s.%c = uintBitsToFloat(%s);",c->stage==ST_GS? "g_pos" : "gl_Position","xyzw"[comp],val); return; }
+  if(c->stage==ST_GS && ((addr>=0x2C0 && addr<0x2E0) || addr==0x6C || addr==0x68)){ emitl(c,"/* geometry output %x not kept */",addr); return; }
   switch(addr){
     case 0x6C: c->si->writes_point_size=1; emitl(c,"gl_PointSize = uintBitsToFloat(%s);",val); return;
     case 0x64: c->si->writes_layer=1; emitl(c,"SWR_SET_LAYER(int(%s));",val); return;
@@ -351,7 +368,9 @@ static int track_handle(Ctx* c, u32 idx, u32 rb, u32* bank, u32* off){
   if(n==2){ g_bl2=1; g_bl2_bank=bk[1]; g_bl2_off=of[1]/4; }
   return 1; }
 
-static const char* IW(Ctx* c, int s, const char* smp){
+static int g_cur_tex=-1;   /* the slot of the sample being written (channel masks) */
+static void tex_cmask(Ctx* c, u32 m){ if(g_cur_tex>=0 && g_cur_tex<c->si->ntex) c->si->tex[g_cur_tex].cmask|=(u8)m; }
+static const char* IW(Ctx* c, int s, const char* smp){ g_cur_tex=s;
   if(s<0 || s>=32 || !((c->si->tex_int_mask>>s)&1)) return smp;
   return T("uintBitsToFloat(uvec4(%s))",smp); }
 
@@ -370,6 +389,7 @@ static void write_texs(Ctx* c, u64 w, const char* v, int fp16){
   int comps[4]; int n=0;
   if(db==255){ static const int tab[8][2]={{0,-1},{1,-1},{2,-1},{3,-1},{0,1},{0,3},{1,3},{2,3}}; for(int k=0;k<2;k++) if(tab[sw][k]>=0) comps[n++]=tab[sw][k]; }
   else { static const int tab[5][4]={{0,1,2,-1},{0,1,3,-1},{0,2,3,-1},{1,2,3,-1},{0,1,2,3}}; if(sw>4) sw=4; for(int k=0;k<4;k++) if(tab[sw][k]>=0) comps[n++]=tab[sw][k]; }
+  for(int k=0;k<n;k++) tex_cmask(c,1u<<comps[k]);
   if(fp16){
     if(n>0) setr(c,da,n>1? T("packHalf2x16(vec2(%s.%c,%s.%c))",v,"xyzw"[comps[0]],v,"xyzw"[comps[1]]) : T("packHalf2x16(vec2(%s.%c,0.0))",v,"xyzw"[comps[0]]));
     if(n>2) setr(c,db,n>3? T("packHalf2x16(vec2(%s.%c,%s.%c))",v,"xyzw"[comps[2]],v,"xyzw"[comps[3]]) : T("packHalf2x16(vec2(%s.%c,0.0))",v,"xyzw"[comps[2]]));
@@ -517,7 +537,8 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
       case 0x20: v= c->stage==ST_CS? "(gl_LocalInvocationID.x | (gl_LocalInvocationID.y<<16) | (gl_LocalInvocationID.z<<26))" : "0u"; break;
       case 0x21: v= c->stage==ST_CS? "gl_LocalInvocationID.x" : "0u"; break; case 0x22: v= c->stage==ST_CS? "gl_LocalInvocationID.y" : "0u"; break; case 0x23: v= c->stage==ST_CS? "gl_LocalInvocationID.z" : "0u"; break;
       case 0x25: v= c->stage==ST_CS? "gl_WorkGroupID.x" : "0u"; break; case 0x26: v= c->stage==ST_CS? "gl_WorkGroupID.y" : "0u"; break; case 0x27: v= c->stage==ST_CS? "gl_WorkGroupID.z" : "0u"; break;
-      case 0x1D: v= c->stage==ST_FS? "0u" : "0x00ff0000u"; break;
+      case 0x1D: v= c->stage==ST_FS? "0u" : c->stage==ST_GS? T("(%uu<<16)",gs_nverts(c->si->attr_int_mask&15)) : "0x00ff0000u"; break;
+      case 0x11: v= c->stage==ST_GS? "uint(gl_InvocationID)" : "0u"; break;
       case 0x38: v="1u"; break; case 0x39: v="0u"; break; case 0x3A: v="1u"; break; case 0x3B: v="0xFFFFFFFEu"; break; case 0x3C: v="0xFFFFFFFFu"; break;
       case 0x50: case 0x52: v="uint(0)"; break; default: v="0u"; }
     setr(c,d,v); break; }
@@ -661,9 +682,14 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     setr(c,d,T("(%s * %s + %s)",R(c,a),Bv,Cv)); break; }
   case O_LEA_LR: case O_LEA_LC: case O_LEA_LI: case O_LEA_HR: case O_LEA_HC: {
     char* Bv= id==O_LEA_LR||id==O_LEA_HR? R(c,B(w,20,8)) : id==O_LEA_LI? imm20i(w) : CB(c,cb_idx(w),cb_off(w));
-    u32 sh= (id==O_LEA_LR||id==O_LEA_LI||id==O_LEA_LC)? B(w,39,5) : B(w,28,5);
-    char* A=R(c,a); if(B(w,45,1)) A=T("(0u-%s)",A);
-    if(id==O_LEA_HR||id==O_LEA_HC){ char* hi=R(c,B(w,39,8)); setr(c,d,T("((%s >> (32u-%uu)) | (%s << %uu)) + %s",A,sh?sh:32,hi,sh,Bv)); }
+    /* LEA.HI keeps its shift and negate elsewhere: register form shift 28, neg 37; cbuf form shift 51, neg 56 (bits 28
+       and 45 there are the cbuf offset and the high register). Read as the low form, Prime 4's scan visor computed the
+       target's counter index as base-id instead of id/2+base and never counted a pixel */
+    int hi_= id==O_LEA_HR||id==O_LEA_HC;
+    u32 sh= !hi_? B(w,39,5) : id==O_LEA_HR? B(w,28,5) : B(w,51,5);
+    char* A=R(c,a); if(B(w, !hi_? 45 : id==O_LEA_HR? 37 : 56, 1)) A=T("(0u-%s)",A);
+    if(hi_){ char* hi=R(c,B(w,39,8));
+      if(!sh) setr(c,d,T("(%s + %s)",hi,Bv)); else setr(c,d,T("((%s >> %uu) | (%s << %uu)) + %s",A,32-sh,hi,sh,Bv)); }
     else setr(c,d,T("((%s << %uu) + %s)",A,sh,Bv));
     if(B(w,48,3)!=7 && (id==O_LEA_LR||id==O_LEA_LI||id==O_LEA_LC)) setp(c,B(w,48,3),"false");
     break; }
@@ -719,9 +745,11 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     setr(c,d,v); break; }
   /* AL2P: attribute number to attribute address. Outside tessellation patches that is the register plus the offset
      (11-bit signed); the address then feeds an indexed ALD/AST. 200 of Metroid Prime 4's shaders use it */
+  case O_ISBERD: setr(c,d,R(c,a)); break;
   case O_AL2P: { i32 off=(i32)(B(w,20,11)<<21)>>21; setr(c,d,T("(%s + %uu)",R(c,a),(u32)off)); break; }
   case O_ALD: {
     u32 addr=B(w,20,10), n=B(w,47,2)+1; int is_out=B(w,32,1);
+    if(c->stage==ST_GS){ u32 vr=B(w,39,8); c->gs_vtx= vr==255? "0" : T("min(int(%s),%u)",R(c,vr),gs_nverts(c->si->attr_int_mask&15)-1); }
     if(B(w,8,8)!=255){ /* indexed: a switch over position and the 16 generic attributes (as AST below), unknown = 0 */
       emitl(c,"{ uint aa_ = %s + %uu;",R(c,B(w,8,8)),addr); c->indent++;
       for(u32 k=0;k<n;k++){ u32 rd=d+k; if(rd==255) continue; c->used_reg[rd]=1;
@@ -729,15 +757,15 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
         for(u32 q=0;q<4;q++) emitl(c,"case %uu: r%u = %s; break;",0x70+q*4,rd,attr_read(c,0x70+q*4,is_out));
         for(u32 i=0;i<16;i++) for(u32 q=0;q<4;q++) emitl(c,"case %uu: r%u = %s; break;",0x80+i*16+q*4,rd,attr_read(c,0x80+i*16+q*4,is_out));
         emitl(c,"default: r%u = 0u; break;",rd); c->indent--; emitl(c,"}"); }
-      c->indent--; emitl(c,"}"); break; }
+      c->indent--; emitl(c,"}"); c->gs_vtx=NULL; break; }
     for(u32 k=0;k<n;k++) setr(c,d+k,attr_read(c,addr+k*4,is_out));
-    break; }
+    c->gs_vtx=NULL; break; }
   case O_AST: {
     u32 addr=B(w,20,10), n=B(w,47,2)+1; u32 ra=B(w,8,8);
     if(ra!=255){ /* runtime-indexed output */
       emitl(c,"{ uint aa_ = %s + %uu;",R(c,ra),addr); c->indent++;
       for(u32 k=0;k<n;k++){ const char* v=R(c,d+k); emitl(c,"switch(aa_ + %uu){",k*4); c->indent++;
-        for(u32 q=0;q<4;q++) emitl(c,"case %uu: gl_Position.%c = uintBitsToFloat(%s); break;",0x70+q*4,"xyzw"[q],v);
+        for(u32 q=0;q<4;q++) emitl(c,"case %uu: %s.%c = uintBitsToFloat(%s); break;",0x70+q*4,c->stage==ST_GS? "g_pos" : "gl_Position","xyzw"[q],v);
         for(u32 i=0;i<16;i++){ c->out_used[i]=1; for(u32 q=0;q<4;q++) emitl(c,"case %uu: out_attr%u.%c = uintBitsToFloat(%s); break;",0x80+i*16+q*4,i,"xyzw"[q],v); }
         emitl(c,"default: break;"); c->indent--; emitl(c,"}"); }
       c->indent--; emitl(c,"}"); break; }
@@ -793,6 +821,75 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     c->si->uses_global=1; unsupported(c, id==O_LDG? "LDG" : "STG", w);
     if(id==O_LDG){ u32 sz=B(w,48,3), n= sz==5? 2 : sz>=6? 4 : 1; for(u32 k=0;k<n;k++) setr(c,d+k,"0u"); }
     break; }
+  /* VMNMX: 32-bit min/max of a and b, then a second op with c. Only the word form (selectors/widths at their
+     defaults); Prime 4's scan visor uses max(max(a,b),c) */
+  /* video ops (yuzu/Ryujinx layout): operand selects are 3 bits (byte 0-3, halfword 0-1, word) with the sign at 48
+     (A) and 49 (B); B is a register when bit 50 is set, else a 16-bit immediate. Prime 4's geometry shaders take
+     the vertex count apart from the invocation info with these */
+  case O_VMAD: {
+    int breg=B(w,50,1); const char* va=vsel(R(c,a),B(w,36,3),B(w,48,1)); const char* vb= breg? vsel(R(c,B(w,20,8)),B(w,28,3),B(w,49,1)) : T("%uu",(u32)B(w,20,16));
+    if(B(w,54,1)) va=T("(0u-%s)",va); const char* vc=R(c,B(w,39,8)); if(B(w,53,1)) vc=T("(0u-%s)",vc);
+    const char* e=T("(%s * %s + %s)",va,vb,vc); u32 sc=B(w,51,2); if(sc==1) e=T("(%s >> 7u)",e); else if(sc==2) e=T("(%s >> 15u)",e);
+    setr(c,d,e); break; }
+  case O_VSETP: {
+    int breg=B(w,50,1), sg=B(w,49,1) || (!breg && B(w,48,1)); const char* va=vsel(R(c,a),B(w,36,3),B(w,48,1));
+    const char* vb= breg? vsel(R(c,B(w,20,8)),B(w,28,3),B(w,49,1)) : T("%uu",(u32)B(w,20,16));
+    setp2(c,B(w,3,3),B(w,0,3),B(w,45,2),icmp_expr(B(w,43,3),va,vb,sg),PN(c,B(w,39,3),B(w,42,1))); break; }
+  case O_VMNMX: {
+    u32 aw=B(w,37,2), bw=B(w,29,2), op=B(w,51,3); int sg=B(w,48,1)||B(w,49,1), mx=B(w,56,1);
+    if(aw!=3 || bw!=3 || B(w,47,1) || B(w,55,1)){ unsupported(c,"VMNMX",w); setr(c,d,"0u"); break; }
+    const char* A=R(c,a); const char* Bv= B(w,50,1)? R(c,B(w,20,8)) : T("%uu",(u32)B(w,20,16)); const char* C=R(c,B(w,39,8));
+    const char* r= sg? T("uint(%s(int(%s),int(%s)))",mx?"max":"min",A,Bv) : T("%s(%s,%s)",mx?"max":"min",A,Bv);
+    const char* v;
+    switch(op){
+      case 0: v=T("bitfieldInsert(%s,%s,16,16)",C,r); break;   /* MRG_16H */
+      case 1: v=T("bitfieldInsert(%s,%s,0,16)",C,r); break;    /* MRG_16L */
+      case 2: v=T("bitfieldInsert(%s,%s,0,8)",C,r); break;     /* MRG_8B0 */
+      case 3: v=T("bitfieldInsert(%s,%s,16,8)",C,r); break;    /* MRG_8B2 */
+      case 4: v=T("(%s + %s)",r,C); break;                     /* ACC */
+      case 5: v= sg? T("uint(min(int(%s),int(%s)))",r,C) : T("min(%s,%s)",r,C); break;
+      case 6: v= sg? T("uint(max(int(%s),int(%s)))",r,C) : T("max(%s,%s)",r,C); break;
+      default: v=r; break; }
+    setr(c,d,v); break; }
+  /* ATOM (global memory) on a tracked SSBO: 32-bit ops, the old value to d */
+  case O_ATOM: if(!getenv("SWR_NO_ATOMICS") && gbuf_slot(c,c->gtag[a])>=0 && B(w,49,3)<=1){
+    int gi=gbuf_slot(c,c->gtag[a]); u32 goff=c->si->gbuf_cbuf_off[gi], gidx=c->si->gbuf_cbuf_idx[gi];
+    i32 imm=(i32)(B(w,28,20)<<12)>>12; u32 op=B(w,52,4); int sg=B(w,49,3)==1; const char* V=R(c,B(w,20,8));
+    c->si->uses_global=1; c->si->gbuf_wmask|=1u<<gi; c->si->gbuf_amask|=1u<<gi;
+    emitl(c,"{ uint o_ = %s + %uu - %s; uint old_;",R(c,a),(u32)imm,CB(c,gidx,goff)); c->indent++;
+    const char* el=T("g%d.d[o_>>2u]",gi);
+    switch(op){
+      case 0: case 10: emitl(c,"old_ = atomicAdd(%s, %s);",el,V); break;
+      case 5: emitl(c,"old_ = atomicAnd(%s, %s);",el,V); break;
+      case 6: emitl(c,"old_ = atomicOr(%s, %s);",el,V); break;
+      case 7: emitl(c,"old_ = atomicXor(%s, %s);",el,V); break;
+      case 8: emitl(c,"old_ = atomicExchange(%s, %s);",el,V); break;
+      case 1: case 2: if(!sg){ emitl(c,"old_ = %s(%s, %s);",op==1?"atomicMin":"atomicMax",el,V); break; }   /* signed: CAS loop below */
+      /* fallthrough */
+      default: { const char* nv= op==1? T("uint(min(int(old_),int(%s)))",V) : op==2? T("uint(max(int(old_),int(%s)))",V)
+                    : op==3? T("(old_ >= %s ? 0u : old_ + 1u)",V) : op==4? T("((old_ == 0u || old_ > %s) ? %s : old_ - 1u)",V,V) : "old_";
+        emitl(c,"old_ = %s; for(int k_=0;k_<64;k_++){ uint e_ = atomicCompSwap(%s, old_, %s); if(e_ == old_) break; old_ = e_; }",el,el,nv); break; } }
+    setr(c,d,"old_"); c->indent--; emitl(c,"}"); break; }
+    unsupported(c,"ATOM",w); setr(c,d,"0u"); break;
+  /* RED: a global atomic without a result (RED.ADD [a], src); Prime 4's scan visor counts the target's visible
+     pixels this way. src is the register in bits 0-7, the address register in 8-15 */
+  case O_RED: if(!getenv("SWR_NO_ATOMICS") && gbuf_slot(c,c->gtag[a])>=0 && B(w,20,3)<=1){
+    int gi=gbuf_slot(c,c->gtag[a]); u32 goff=c->si->gbuf_cbuf_off[gi], gidx=c->si->gbuf_cbuf_idx[gi];
+    i32 imm=(i32)(B(w,28,20)<<12)>>12; u32 op=B(w,23,3); int sg=B(w,20,3)==1; const char* V=R(c,B(w,0,8));
+    c->si->uses_global=1; c->si->gbuf_wmask|=1u<<gi; c->si->gbuf_amask|=1u<<gi;
+    emitl(c,"{ uint o_ = %s + %uu - %s;",R(c,a),(u32)imm,CB(c,gidx,goff)); c->indent++;
+    const char* el=T("g%d.d[o_>>2u]",gi);
+    switch(op){
+      case 0: emitl(c,"atomicAdd(%s, %s);",el,V); break;
+      case 1: case 2: if(!sg){ emitl(c,"%s(%s, %s);",op==1?"atomicMin":"atomicMax",el,V); break; }
+        emitl(c,"{ uint old_ = %s; for(int k_=0;k_<64;k_++){ uint e_ = atomicCompSwap(%s, old_, uint(%s(int(old_),int(%s)))); if(e_ == old_) break; old_ = e_; } }",el,el,op==1?"min":"max",V); break;
+      case 3: case 4: emitl(c,"{ uint old_ = %s; for(int k_=0;k_<64;k_++){ uint e_ = atomicCompSwap(%s, old_, %s); if(e_ == old_) break; old_ = e_; } }",el,el,
+                 op==3? T("(old_ >= %s ? 0u : old_ + 1u)",V) : T("((old_ == 0u || old_ > %s) ? %s : old_ - 1u)",V,V)); break;
+      case 5: emitl(c,"atomicAnd(%s, %s);",el,V); break;
+      case 6: emitl(c,"atomicOr(%s, %s);",el,V); break;
+      case 7: emitl(c,"atomicXor(%s, %s);",el,V); break; }
+    c->indent--; emitl(c,"}"); break; }
+    unsupported(c,"RED",w); break;
   /* ---------------- textures */
   case O_TEXS: {
     u32 enc=B(w,53,4), ra=a, rb=B(w,20,8); u32 off=B(w,36,13);
@@ -893,7 +990,7 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     const char* smp;
     if(dc) smp= ofs? T("textureGatherOffset(tex%d, %s, %s, ivec2(bitfieldExtract(int(%s),0,6),bitfieldExtract(int(%s),8,6)))",s,crd,dref,ofs,ofs) : T("textureGather(tex%d, %s, %s)",s,crd,dref);
     else smp= ofs? T("textureGatherOffset(tex%d, %s, ivec2(bitfieldExtract(int(%s),0,6),bitfieldExtract(int(%s),8,6)), %u)",s,crd,ofs,ofs,comp) : T("textureGather(tex%d, %s, %u)",s,crd,comp);
-    emitl(c,"{ vec4 t_ = %s;",IW(c,s,smp)); c->indent++;
+    emitl(c,"{ vec4 t_ = %s;",IW(c,s,smp)); c->indent++; tex_cmask(c,15);
     { u32 da=d, db=B(w,28,8); if(B(w,55,1)){ setr(c,da,"packHalf2x16(t_.xy)"); setr(c,db,"packHalf2x16(t_.zw)"); }
       else { setrf(c,da,"t_.x"); if(da!=255) setrf(c,da+1,"t_.y"); if(db!=255){ setrf(c,db,"t_.z"); setrf(c,db+1,"t_.w"); } } }
     c->indent--; emitl(c,"}"); break; }
@@ -941,7 +1038,7 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
                                     : T("texture(tex%d, %s + vec2(ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4)))/vec2(textureSize(tex%d,0)))",s,cc,ofs,ofs,s);
         else smp=T("textureOffset(tex%d, %s, ivec2(bitfieldExtract(int(%s),0,4),bitfieldExtract(int(%s),4,4)))",s,cc,ofs,ofs); }
     }
-    emitl(c,"{ vec4 t_ = %s;",IW(c,s,smp)); c->indent++; write_masked(c,d,mask? mask : 15,"t_"); c->indent--; emitl(c,"}");
+    emitl(c,"{ vec4 t_ = %s;",IW(c,s,smp)); c->indent++; tex_cmask(c,mask? mask : 15); write_masked(c,d,mask? mask : 15,"t_"); c->indent--; emitl(c,"}");
     break; }
   case O_TXQ: case O_TXQ_B: {
     u32 q=B(w,22,6), mask=B(w,31,4), off=B(w,36,13); int bl= id==O_TXQ_B; u32 blbank=0, bloff=0;
@@ -983,7 +1080,7 @@ static void inst(Ctx* c, u32 idx, u64 w, const Op* op){
     else setrf(c,d,T("(%s + %s)",RF(c,a),RF(c,rb)));
     break; }
   case O_OUT_R: case O_OUT_C: case O_OUT_I: {
-    u32 k=B(w,39,2); if(k&1) emitl(c,"EmitVertex();"); if(k&2) emitl(c,"EndPrimitive();"); setr(c,d,R(c,a)); break; }
+    u32 k=B(w,39,2); if(k&1) emitl(c, c->stage==ST_GS? "swr_emit();" : "EmitVertex();"); if(k&2) emitl(c,"EndPrimitive();"); setr(c,d,R(c,a)); break; }
   case O_HADD2_R: case O_HMUL2_R: case O_HFMA2_R: case O_HADD2_C: case O_HMUL2_C: case O_HADD2_I: case O_HMUL2_I: case O_HADD2_32I: case O_HMUL2_32I: case O_HFMA2_32I: case O_HFMA2_I: case O_HFMA2_RC: case O_HFMA2_CR: {
     /* packed f16 (same approach as yuzu): swizzle, neg/abs, sat, merge */
     int isadd= id==O_HADD2_R||id==O_HADD2_C||id==O_HADD2_I||id==O_HADD2_32I; int isfma= id==O_HFMA2_R||id==O_HFMA2_32I||id==O_HFMA2_I||id==O_HFMA2_RC||id==O_HFMA2_CR;
@@ -1282,7 +1379,7 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
     for(unsigned k=0;k<sizeof ps/sizeof ps[0];k++) sb_f(D,"precision highp %s;\n",ps[k]); }
   else sb_f(D,"#version %d core\n",g_glsl_version);
   /* gl_Layer from the VS needs an extension on desktop GL; without one we render to layer 0 */
-  if(stage!=ST_FS && si->writes_layer){
+  if(stage==ST_VS && si->writes_layer){
     if(g_vs_layer_ext==1) sb_put(D,"#extension GL_ARB_shader_viewport_layer_array : require\n#define SWR_SET_LAYER(v) gl_Layer=(v)\n");
     else if(g_vs_layer_ext==2) sb_put(D,"#extension GL_AMD_vertex_shader_layer : require\n#define SWR_SET_LAYER(v) gl_Layer=(v)\n");
     else if(g_vs_layer_ext==3) sb_put(D,"#extension GL_NV_viewport_array2 : require\n#define SWR_SET_LAYER(v) gl_Layer=(v)\n");
@@ -1296,7 +1393,7 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
   /* packed binding numbers, Intel's windows driver has very few: VS 0.., FS 1.., others 2.. */
   int slot= stage==ST_VS? 0 : stage==ST_FS? 1 : 2;
   int base_bind=slot*18;
-  for(int i=0;i<si->ngbuf;i++) sb_f(D,"layout(std430, binding=%d) %sbuffer S%d_G%d { uint d[]; } g%d;\n",stage==ST_CS? i : slot*8+i,((si->gbuf_wmask>>i)&1)? "" : "readonly ",stage,i,i);
+  for(int i=0;i<si->ngbuf;i++) sb_f(D,"layout(std430, binding=%d) %sbuffer S%d_G%d { uint d[]; } g%d;\n",stage==ST_CS? i : swr_gb_bind(slot,i),((si->gbuf_wmask>>i)&1)? "" : "readonly ",stage,i,i);
   if(stage==ST_CS) sb_f(D,"layout(local_size_x=%u, local_size_y=%u, local_size_z=%u) in;\n",si->cs_local[0]? si->cs_local[0] : 1,si->cs_local[1]? si->cs_local[1] : 1,si->cs_local[2]? si->cs_local[2] : 1);
   for(int i=0;i<18;i++) if(si->cbuf_mask&(1u<<i)) sb_f(D,"layout(std140, binding=%d) uniform S%d_CB%d { vec4 d[4096]; } cb%d;\n",base_bind+i,stage,i,i);
   for(int i=0;i<si->ntex;i++){ ShTex* t=&si->tex[i]; sb_f(D,"layout(binding=%d) uniform %s S%d_tex%d;\n#define tex%d S%d_tex%d\n",slot*(g_glsl_es? 16 : 32)+i,T("%s%s",(!t->shadow && ((si->tex_int_mask>>i)&1))? (((si->tex_sint_mask>>i)&1)? "i" : "u") : "",samp_type(t->type,t->array,t->shadow)),stage,i,i,stage,i); }   /* stage-unique name */
@@ -1312,6 +1409,35 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
     for(int i=0;i<32;i++) if(c->in_used[i]){ si->in_mask|=1u<<i; u8 m=imap[i]; int f=(m&3)==1 || ((m>>2)&3)==1 || (flat>>i)&1; int lin=(m&3)==3;
       sb_f(D,"layout(location=%d) %sin vec4 in_attr%d;\n",i,f? "flat " : (lin && !g_glsl_es)? "noperspective " : "",i); }
     u32 target=si->sph[18]; for(int rt=0;rt<8;rt++) if((target>>(rt*4))&15) sb_f(D,"layout(location=%d) out %s frag_color%d;\n",rt,((si->rt_int_mask>>rt)&1)? (((si->rt_sint_mask>>rt)&1)? "ivec4" : "uvec4") : "vec4",rt);
+  } else if(stage==ST_GS){
+    /* Geometry: inputs are arrays over the primitive's vertices, outputs are staged in globals and copied out by
+       swr_emit() at each OUT.EMIT (GL leaves outputs undefined after EmitVertex, Maxwell keeps them). A passthrough
+       shader (header bit 24, Prime 4's cube map layer pickers) only writes per-primitive values; every input vertex
+       is then sent through with them. Metroid Prime 4 renders its 6-face cube maps this way */
+    u32 cls=attr_int&15, nv=gs_nverts(cls), vsm=(attr_int>>4)&0xFFFF; int pass=(si->sph[0]>>24)&1;
+    u32 otop=(si->sph[3]>>24)&15, maxv=si->sph[4]&0xFFF, inv=si->sph[2]>>24;
+    static const char* ip[5]={"points","lines","triangles","lines_adjacency","triangles_adjacency"};
+    if(pass){ otop= cls==0? 1 : cls==1||cls==3? 6 : 7; maxv=nv; }
+    if(!maxv) maxv=nv;
+    sb_f(D,"layout(%s%s) in;\nlayout(%s, max_vertices=%u) out;\n",ip[cls<5? cls : 2],inv>1? T(", invocations=%u",inv) : "",otop==1? "points" : otop==6? "line_strip" : "triangle_strip",maxv);
+    sb_put(D,"in gl_PerVertex { vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; } gl_in[];\n"
+             "out gl_PerVertex { vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; };\n");
+    u32 inm=0, outm=0; for(int i=0;i<32;i++){ if(c->in_used[i]) inm|=1u<<i; if(c->out_used[i]) outm|=1u<<i; }
+    if(pass){ inm|=vsm; outm|=vsm; }
+    si->in_mask=inm; si->out_mask=outm;
+    for(int i=0;i<32;i++) if((inm>>i)&1) sb_f(D,"layout(location=%d) in vec4 in_attr%d[];\n",i,i);
+    for(int i=0;i<32;i++) if((outm>>i)&1) sb_f(D,"layout(location=%d) out vec4 gso_attr%d;\nvec4 out_attr%d = vec4(0.0);\n",i,i,i);
+    /* the Y flip and depth remap a vertex shader does at its end (gpu_gl.c sh_post) move here when a geometry shader
+       follows: the vertex stage then hands over untransformed positions, as on the hardware */
+    sb_put(D,"uniform vec4 swr_vp;\nvec4 g_pos = vec4(0.0, 0.0, 0.0, 1.0);\nint g_layer = 0;\n#define SWR_SET_LAYER(v) g_layer=(v)\n"
+             "void swr_vpx(){ gl_Position.y *= swr_vp.x; if(swr_vp.y!=0.0) gl_Position.z = gl_Position.z*2.0 - gl_Position.w; }\n");
+    sb_put(D,"void swr_emit(){\n  gl_Position = g_pos; swr_vpx(); gl_PointSize = 1.0; gl_Layer = g_layer;\n");
+    for(int i=0;i<32;i++) if((outm>>i)&1) sb_f(D,"  gso_attr%d = out_attr%d;\n",i,i);
+    sb_put(D,"  EmitVertex();\n}\n");
+    if(pass){ sb_f(D,"void swr_pass(){\n  for(int v=0;v<%u;v++){\n    gl_Position = gl_in[v].gl_Position; swr_vpx(); gl_PointSize = 1.0; gl_Layer = g_layer;\n"
+                     "    for(int k=0;k<8;k++) gl_ClipDistance[k] = gl_in[v].gl_ClipDistance[k];\n",nv);
+      for(int i=0;i<32;i++) if((outm>>i)&1) sb_f(D,"    gso_attr%d = %s;\n",i,c->out_used[i]? T("out_attr%d",i) : T("in_attr%d[v]",i));
+      sb_put(D,"    EmitVertex();\n  }\n  EndPrimitive();\n}\n"); }
   }
   if(c->uses_local) sb_put(D,"uint lmem[1024];\n");
   if(c->uses_shared) sb_f(D,"shared uint smem[%d];\n", stage==ST_CS && si->shared_size>0? (si->shared_size+3)/4 : 16384);
@@ -1341,7 +1467,8 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
     if(strstr(b,"fsat(")) sb_put(D,"float fsat(float x){ return isnan(x) ? 0.0 : clamp(x,0.0,1.0); }\n");
     if(strstr(b,"fmn(")) sb_put(D,"float fmn(float a, float b){ return isnan(a) ? b : (isnan(b) ? a : min(a,b)); }\n");
     if(strstr(b,"fmx(")) sb_put(D,"float fmx(float a, float b){ return isnan(a) ? b : (isnan(b) ? a : max(a,b)); }\n"); }
-  sb_put(D,"void main(){\n");
+  int gs_pass= stage==ST_GS && ((si->sph[0]>>24)&1);
+  sb_put(D,gs_pass? "void swr_main(){\n" : "void main(){\n");
   /* Position components omitted by a vertex shader must remain deterministic.
      Screen-space passes commonly write only X/Y; undefined Z/W can clip a
      whole quad or one triangle depending on preceding GPU execution. */
@@ -1359,6 +1486,7 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
   if(c->uses_stk[2]) sb_put(D,"  uint pcnt[16]; int pcnt_sp=0;\n");
   if(stage==ST_FS){ u32 target=si->sph[18]; for(int rt=0;rt<8;rt++) if((target>>(rt*4))&15) sb_f(D,"  frag_color%d = %s(0);\n",rt,((si->rt_int_mask>>rt)&1)? (((si->rt_sint_mask>>rt)&1)? "ivec4" : "uvec4") : "vec4"); }
   sb_put(D,c->out.p? c->out.p : ""); sb_put(D,"}\n");
+  if(gs_pass) sb_put(D,"void main(){ swr_main(); swr_pass(); }\n");
   char* r=D->p; free(c->out.p); free(c->pop_tgt); free(c);
   return r;
 }

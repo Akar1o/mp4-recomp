@@ -11,6 +11,7 @@ typedef struct {
   u32 cbuf_off;        /* handle offset in the texture cbuf, in words */
   u8 type;             /* 0 1D 1 2D 2 3D 3 CUBE */
   u8 array, shadow, fetch_only, is_int;
+  u8 cmask;            /* channels the shader reads (gpu_gl.c: depth-stencil textures read for their stencil) */
   u8 bindless; u8 bl_cbuf; u8 bl2; u8 bl2_cbuf;   /* bl2: handle = read1 | read2 (separate tex/sampler handles) */
   u32 bl2_off;          /* word offset of read2 */
 } ShTex;
@@ -34,6 +35,7 @@ typedef struct {
   int unsupported;               /* count of instructions we couldn't translate */
   char first_unsupported[64];
   u32 cs_local[3]; int shared_size;
+  u32 gbuf_amask;                /* gbufs updated with atomics (counters the CPU reads: gpu_gl.c gw_sync) */
   u32 gbuf_wmask;                /* gbufs written (compute) */
   struct { u32 cbuf_off; u8 type, bindless, bl_cbuf, pad; } img[8]; int nimg;   /* SUST targets (compute) */
   u32 sutex_mask;                /* SULD.D reads, these need their format class in swr_tc */
@@ -43,4 +45,10 @@ typedef struct {
 char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si);
 extern int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
 u64 shader_hash(const u8* code, u32 max_bytes, u32* out_len);
+/* global buffer (SSBO) binding of buffer i of a draw stage (slot 0 vertex, 1 pixel, 2 geometry): the first 8 keep
+   the original layout, buffers 8-15 sit above all of those (binding 24+), when the driver has 48 bindings and 16 per
+   stage (g_gbuf_max 16; gpu_gl.c sets it). Metroid Prime 4's skinning/effect vertex shaders write to up to 11
+   buffers: with 8 the stores to the rest were dropped */
+extern int g_gbuf_max;
+static inline int swr_gb_bind(int slot, int i){ return i<8? slot*8+i : 24+slot*8+(i-8); }
 #endif

@@ -51,13 +51,20 @@ static void q_unlock(void){ __atomic_store_n(&g_lock,0,__ATOMIC_RELEASE); }
 int glq_active(void){ return g_active; }
 
 /* ---------- producer */
+volatile unsigned long long g_glq_wait_ns, g_glq_waits;   /* GPU thread blocked on the GL thread: queue full or a round trip */
+unsigned long long g_glq_wait_max; const char* g_glq_wait_what;   /* this frame's longest wait and the call that waited (gpu_gl.c frame_stats resets it) */
+static void q_wait_note(u64 dt, void* ex){ if(dt<=g_glq_wait_max) return; g_glq_wait_max=dt; const char* nm="custom call";
+  if(!ex) nm="queue full"; else for(const GlqEnt* e=g_glq_tab;e->name;e++) if(e->execute==ex){ nm=e->name; break; }
+  g_glq_wait_what=nm; }
 static u8* q_reserve(u32 total){
+  u64 w0=0;
   for(int spins=0;;spins++){
     u64 h=g_qh, t=__atomic_load_n(&g_qt,__ATOMIC_ACQUIRE); u64 pos=h%Q_CAP;
     u64 need= (pos+total>Q_CAP)? (Q_CAP-pos)+total : total;
     if(h+need-t<=Q_CAP){
       if(pos+total>Q_CAP){ QHdr* w=(QHdr*)(g_q+pos); w->size=(u32)(Q_CAP-pos); w->big=0; w->ex=q_wrap_ex; w->data=NULL; h+=Q_CAP-pos; pos=0; }
-      g_qh_pend=h+total; return g_q+pos; }
+      g_qh_pend=h+total; if(w0){ u64 dt=plat_ns()-w0; g_glq_wait_ns+=dt; g_glq_waits++; q_wait_note(dt,NULL); } return g_q+pos; }
+    if(!w0) w0=plat_ns();
     if(spins>64){ if(q_sleepw()) plat_sleep_ns(200000); else plat_yield(); } else if(q_sleepw()) cpu_relax(); }   /* queue full: the GL thread needs the CPU to drain it */
 }
 
@@ -78,9 +85,10 @@ static int q_sync_ready(void* p){ return __atomic_load_n(&((QSync*)p)->done,__AT
 
 void glq_sync(void (*ex)(void*), void* arg){
   if(t_glq_direct || !g_active){ ex(arg); return; }
-  QSync s={ex,arg,0}; QSync** p=(QSync**)glq_alloc(sizeof(QSync*),0,q_sync_ex); *p=&s; glq_commit();
-  if(q_sleepw()){ q_wait(q_sync_ready,&s); return; }
-  for(int i=0;!__atomic_load_n(&s.done,__ATOMIC_ACQUIRE);i++){ if(i>200) plat_yield(); } }
+  QSync s={ex,arg,0}; QSync** p=(QSync**)glq_alloc(sizeof(QSync*),0,q_sync_ex); *p=&s; glq_commit(); u64 w0=plat_ns();
+  if(q_sleepw()) q_wait(q_sync_ready,&s);
+  else for(int i=0;!__atomic_load_n(&s.done,__ATOMIC_ACQUIRE);i++){ if(i>200) plat_yield(); }
+  { u64 dt=plat_ns()-w0; g_glq_wait_ns+=dt; g_glq_waits++; q_wait_note(dt,(void*)ex); } }
 
 static void q_nop(void* arg){ (void)arg; }
 
@@ -210,11 +218,11 @@ static void e_swap(void* p){
 void glq_swap(void){
   if(!g_active || t_glq_direct){ backend_gl_swap(); return; }
   g_swaps_sent++; glq_alloc(16,0,e_swap); glq_commit();
-  /* max one frame ahead, more just adds input lag. At 120+ FPS allow two: one slow GPU frame (an upload burst)
+  /* two frames ahead (SWR_FRAMES_AHEAD=1 for the lowest input lag). Originally one at 60 FPS and two at 120+: one slow GPU frame (an upload burst)
      is then absorbed instead of missing the deadline, and a frame there is only 4-8 ms of extra latency */
   {extern int gpu_gl_present_pacing(void); extern int g_opt_fps;
     static int ahead_env=-1; if(ahead_env<0){ const char* e=getenv("SWR_FRAMES_AHEAD"); ahead_env= e? atoi(e) : 0; }
-    u32 ahead= ahead_env>0? (u32)ahead_env : g_opt_fps>=120? 2u : 1u;
+    u32 ahead= ahead_env>0? (u32)ahead_env : 2u;   /* also at 60: with one frame the CPU and GPU work ran back to back and missed vsync in busy areas (Prime 4: 50 fps with both threads mostly idle) */
     if(gpu_gl_present_pacing()){
       pm_lock(&g_qm);while(g_swaps_sent-__atomic_load_n(&g_swaps_done,__ATOMIC_ACQUIRE)>ahead)pc_wait(&g_swap_cv,&g_qm,-1);pm_unlock(&g_qm);
     }else if(q_sleepw()) q_wait(q_swap_ready,NULL);
@@ -253,6 +261,7 @@ static void gl_thread(void* arg){ plat_diag_role("GL-driver"); (void)arg; trace_
     DebugCallback callback=(DebugCallback)backend_gl_proc("glDebugMessageCallback");
     if(callback){p_glEnable(GL_DEBUG_OUTPUT);p_glEnable(0x8242);callback(driver_debug_message,NULL);LOG("GL driver state diagnostics enabled\n");}
   }
+  { extern void gpu_sampler_glq(void); gpu_sampler_glq(); }   /* SWR_SAMPLE_GLQ=start:seconds */
   g_start_ok=ok; __atomic_store_n(&g_ready,1,__ATOMIC_RELEASE);
   if(!ok) return;
   u32 n=0;
@@ -271,7 +280,7 @@ static void gl_thread(void* arg){ plat_diag_role("GL-driver"); (void)arg; trace_
       QHdr* hd=(QHdr*)(g_q+t%Q_CAP); u32 sz=hd->size;
       void* executed=(void*)hd->ex;u64 operation_start=0;int upload_info[8]={0};int image_upload=0;
       if(trace_driver){if(hd->ex==q_sync_ex)executed=(void*)(*(QSync**)hd->data)->ex;if(executed==trace_upload_2d||executed==trace_compressed_2d){memcpy(upload_info,hd->data,sizeof upload_info);image_upload=1;}operation_start=plat_ns();}
-      { u64 x0=plat_ns(); hd->ex(hd->data); u64 dx=plat_ns()-x0;
+      { extern void gs_stall_mark(int); if(hd->ex!=e_swap) gs_stall_mark(1); u64 x0=plat_ns(); hd->ex(hd->data); u64 dx=plat_ns()-x0; gs_stall_mark(0);
         if(dx>20000000ull){ static int said; if(said<60){ said++; const char* nm="?"; void* fx=(void*)hd->ex;
             if(fx==(void*)q_sync_ex){ nm="sync"; QSync* qs=*(QSync**)hd->data; fx=(void*)qs->ex; }
             for(const GlqEnt* e=g_glq_tab;e->name;e++) if(e->execute==fx){ nm=e->name; break; }
@@ -306,6 +315,42 @@ void glq_read_pixels_pbo(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenu
 void glq_get_tex_image_pbo(GLenum tg, GLint lv, GLenum f, GLenum t, uintptr_t off){
   if(!g_active || t_glq_direct){ ((T_gti)backend_gl_proc("glGetTexImage"))(tg,lv,f,t,(void*)off); return; }
   APT* a=glq_alloc(sizeof *a,0,e_gti_pbo); a->tg=tg; a->lv=lv; a->f=f; a->t=t; a->off=off; glq_commit(); }
+
+/* occlusion queries: a fixed pool of query objects, named on the GL thread so the caller never waits for a name */
+typedef void (APIENTRY *T_gq)(GLsizei,GLuint*); typedef void (APIENTRY *T_bq)(GLenum,GLuint); typedef void (APIENTRY *T_eq)(GLenum);
+typedef void (APIENTRY *T_gqo)(GLuint,GLenum,GLuint64*); typedef void (APIENTRY *T_bb)(GLenum,GLuint);
+typedef struct { int op, slot; GLuint buf; uintptr_t off; } AOQ;
+static void e_occl(void* p){ AOQ* a=p; static GLuint names[256]; static T_gq gq; static T_bq bq; static T_eq eq; static T_gqo gqo; static T_bb bb;
+  if(!gq){ gq=(T_gq)backend_gl_proc("glGenQueries"); bq=(T_bq)backend_gl_proc("glBeginQuery"); eq=(T_eq)backend_gl_proc("glEndQuery");
+    gqo=(T_gqo)backend_gl_proc("glGetQueryObjectui64v"); bb=(T_bb)backend_gl_proc("glBindBuffer"); }
+  if(!gq || !bq || !eq || !gqo || !bb || a->slot<0 || a->slot>=256) return;
+  if(!names[a->slot]) gq(1,&names[a->slot]);
+  if(a->op==0) bq(0x8914 /* GL_SAMPLES_PASSED */,names[a->slot]);
+  else if(a->op==1) eq(0x8914);
+  else { bb(0x9192 /* GL_QUERY_BUFFER */,a->buf); gqo(names[a->slot],0x8866 /* GL_QUERY_RESULT */,(GLuint64*)a->off); bb(0x9192,0); } }
+void glq_occl(int op, int slot, GLuint buf, uintptr_t off){
+  AOQ v={op,slot,buf,off};
+  if(!g_active || t_glq_direct){ e_occl(&v); return; }
+  AOQ* a=glq_alloc(sizeof *a,0,e_occl); *a=v; glq_commit(); }
+
+/* game program uniforms by name (glq.h). A glGetUniformLocation on the GPU thread waited for the GL thread to catch up:
+   31-132 ms when it was busy with an area's big uploads, a slow frame each time a new shader was first drawn. The cache
+   is by program name; game programs are never deleted, and the ones that are (failed links, pack rebuilds) never get
+   here, so a reused name cannot meet a stale entry */
+typedef GLint (APIENTRY *T_gul)(GLuint,const GLchar*); extern T_gul r_glGetUniformLocation;
+typedef void (APIENTRY *T_pu4)(GLuint,GLint,GLsizei,const GLfloat*); extern T_pu4 r_glProgramUniform4fv;
+typedef struct { GLuint p; GLint loc[2]; } ULoc;
+static ULoc g_uloc[16384];
+typedef struct { GLuint p; int which; float v[4]; } AUN;
+static void e_pun(void* x){ AUN* a=x; static const char* const nm[2]={"swr_vp","swr_at"}; T_gul gul=r_glGetUniformLocation; T_pu4 pu=r_glProgramUniform4fv;
+  if(!gul) gul=(T_gul)backend_gl_proc("glGetUniformLocation"); if(!pu) pu=(T_pu4)backend_gl_proc("glProgramUniform4fv");
+  ULoc* e=NULL; u32 h=(a->p*2654435761u)&16383;
+  for(int n=0;n<16384;n++,h=(h+1)&16383){ ULoc* c=&g_uloc[h]; if(c->p==a->p){ e=c; break; } if(!c->p){ c->p=a->p; c->loc[0]=c->loc[1]=-3; e=c; break; } }
+  GLint loc= e? e->loc[a->which] : -3; if(loc==-3){ loc=gul(a->p,nm[a->which]); if(e) e->loc[a->which]=loc; }
+  if(loc>=0) pu(a->p,loc,1,a->v); }
+void glq_prog_uniform_named(GLuint prog, int which, const float* v){
+  if(!g_active || t_glq_direct){ AUN a={prog,which,{v[0],v[1],v[2],v[3]}}; e_pun(&a); return; }
+  AUN* a=glq_alloc(sizeof *a,0,e_pun); a->p=prog; a->which=which; memcpy(a->v,v,sizeof a->v); glq_commit(); }
 
 /* compressed uploads from a bound GL_PIXEL_UNPACK_BUFFER (the data pointer is an offset into it) */
 typedef void (APIENTRY *T_cts2)(GLenum,GLint,GLint,GLint,GLsizei,GLsizei,GLenum,GLsizei,const void*); extern T_cts2 r_glCompressedTexSubImage2D;

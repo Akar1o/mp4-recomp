@@ -186,7 +186,7 @@ static Rec recommend() {
     Rec r; float ratio = (float)g_hw.w / std::max(1, g_hw.h);
     r.asp = ratio >= 2.2f ? "21:9" : fabsf(ratio - 1.6f) < 0.02f ? "16:10" : "16:9";
     float base = game_base_h(true, r.asp.c_str()), native = roundf(g_hw.h / base * 20) / 20;
-    r.res = g_hw.tier == "high" ? (g_hw.h >= 2000 ? native : std::max(native, 2.0f)) : g_hw.tier == "mid" ? std::min(native, 1.5f) : 1.0f;
+    r.res = 1.0f;   // the game's own resolution: above it costs GPU-thread time in busy areas (measured: 50 fps at 2x vs 60 at 1x)
     r.fps = g_hw.hz >= 230 && g_hw.tier == "high" && g_hw.cores >= 8 ? "240" : g_hw.hz >= 140 && g_hw.tier != "low" ? "144" : g_hw.hz >= 115 && g_hw.tier != "low" ? "120" : "1";
     r.af = g_hw.tier != "low" ? "16" : "4";
     r.sharp = base * r.res < g_hw.h - 1 ? "25" : "0";   // the picture is stretched to the screen: a light sharpen

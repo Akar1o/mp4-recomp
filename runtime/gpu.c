@@ -88,6 +88,7 @@ static void puller_method(GpuChannel* ch, u32 m, u32 v){
     case 0x07: { /* SemaphoreOperation */
       u64 addr=((u64)(r[4]&0xFF)<<32)|r[5]; u32 op=v&0x1F;
       if(op==2){ /* release */
+        { extern void gpu_gl_gw_sync(void); gpu_gl_gw_sync(); }
         if(v&(1u<<24)) { gmem_w32(addr,r[6]); }                     /* 4 bytes only */
         else { extern u64 gpu_ticks(void); u32 q[4]={r[6],0,0,0}; u64 t=gpu_ticks(); memcpy(&q[2],&t,8); gmem_write(addr,q,16); }
       } else if(op==1 || op==4){ /* acquire, with a timeout so a bad value can't hang us */
@@ -140,8 +141,18 @@ extern void r3d_pending_flush(void); extern int r3d_pending_on(void);
 
 static void call_method_(GpuChannel* ch, u32 sub, u32 m, u32 v, int last);
 /* a method that takes long on the GPU thread holds up every fence after it (Prime 4 waits for them: hitches) */
+/* where the GPU thread's time goes, by engine (SWR_METHOD_PROFILE=1: totals in the log every 5 s) */
+static u64 g_mp_ns[8][4], g_mp_n[8][4], g_mp_t0;
+static int mp_cls(u32 c){ return c==0? 0 : c==0xB197? 1 : c==0xB1C0? 2 : c==0xA140? 3 : c==0x902D? 4 : c==0xB0B5? 5 : 6; }
 static void call_method(GpuChannel* ch, u32 sub, u32 m, u32 v, int last){
+  static int prof=-1; if(prof<0) prof=getenv("SWR_METHOD_PROFILE")!=NULL;
+  static int slow=-1; if(slow<0) slow=getenv("SWR_SLOW_METHODS")!=NULL;
+  if(!prof && !slow){ call_method_(ch,sub,m,v,last); return; }   /* timing every method cost ~9% of the GPU thread */
   u64 t0=plat_ns(); call_method_(ch,sub,m,v,last); u64 dt=plat_ns()-t0;
+  if(prof){ int c=mp_cls(m<0x40? 0 : ch->sub_class[sub]); int k= m>=0xE00? 1 : (m==0x585||m==0x586||m==0x5F8||m==0x5FA||m==0x5FC)? 2 : m<0x40? 3 : 0; g_mp_ns[c][k]+=dt; g_mp_n[c][k]++;
+    if(t0-g_mp_t0>5000000000ull){ if(g_mp_t0){ static const char* cn[7]={"puller","3D","compute","I2M","2D","DMA","other"}; static const char* kn[4]={"methods","macros","draw calls","puller"};
+        LOG("method profile (5 s):"); for(int i=0;i<7;i++) for(int j=0;j<4;j++) if(g_mp_ns[i][j]>1000000ull) LOG(" %s/%s %.0f ms (%llu)",cn[i],kn[j],g_mp_ns[i][j]/1e6,(unsigned long long)g_mp_n[i][j]); LOG("\n"); }
+      memset(g_mp_ns,0,sizeof g_mp_ns); memset(g_mp_n,0,sizeof g_mp_n); g_mp_t0=t0; } }
   if(dt>15000000ull){ static int said; if(said<80){ said++; LOG("gpu: slow method class %x method %x value %x: %.1f ms\n",m<0x40? 0 : ch->sub_class[sub],m,v,dt/1e6); } } }
 static void call_method_(GpuChannel* ch, u32 sub, u32 m, u32 v, int last){
   if(m<0x40){ if(r3d_pending_on()) r3d_pending_flush(); puller_method(ch,m,v); if(m==0){ ch->sub_class[sub]=v&0xFFFF; } return; }
@@ -211,6 +222,7 @@ void gpu_submit_now(u64* e, u32 n, u32 channel){
   }
   r3d_pending_flush();
   gpu_flush(ch);
+  { extern void gpu_gl_gw_sync(void); gpu_gl_gw_sync(); }   /* before the submit's syncpoint increments */
   pm_unlock(&g_gpulock);
 }
 

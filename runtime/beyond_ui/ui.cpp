@@ -534,7 +534,7 @@ static std::vector<Opt> build_options() {
     I("fast_forward_speed", "Performance", "Gameplay", "Fast-forward speed", LIVE_YES, "3", 2, 8, 1, "");
     // Audio
     I("volume", "Audio", "Audio", "Master volume", LIVE_YES, "100", 0, 200, 5, "");
-    B("audio_surround_downmix", "Performance", "Audio", "Mix all six surround channels into stereo", LIVE_YES, "0", "");
+    B("audio_surround_downmix", "Performance", "Audio", "Mix all six surround channels into stereo (off drops the center channel: no dialogue)", LIVE_YES, "1", "");
     // Controls
     B("mouse_aim", "Input", "Controls", "Mouse free aim", LIVE_YES, "1",
       "Hold the right mouse button and move the mouse to aim in any direction. Left click shoots, middle click arms missiles.");

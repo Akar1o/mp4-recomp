@@ -15,7 +15,7 @@ volatile int g_quit;
 int g_frames;
 int g_opt_video_async_retire=0,g_opt_video_avx2=1,g_opt_video_block_copy=1;   /* both checked byte for byte against the plain versions */
 int g_present_pacing_candidate;
-int g_opt_audio_surround_downmix=0;
+int g_opt_audio_surround_downmix=1;   /* Prime 4 mixes in 5.1 with dialogue in the center channel: front-only stereo dropped the voices */
 /* FPS counter ([Graphics] show_fps): a seven-segment "123 FPS" in the top-left corner as plain rectangles, so every
    build and renderer can draw it with clears (gpu_gl.c window pass, snxvk hdr.c present pass). Counted from presents,
    i.e. the frames that reach the screen, over half a second. Each rect: x, y (top-left origin), w, h, 0 back / 1 text */
@@ -414,7 +414,7 @@ static const IniOpt INI_GRAPHICS[]={
 #endif
   {NULL,NULL,NULL}};
 static const IniOpt INI_PERF[]={
-  {"audio_surround_downmix","0","1 = include all six audio channels in stereo output (experimental)"},
+  {"audio_surround_downmix","1","1 = mix all six audio channels into the stereo output, as the console does (0 = front left/right only: no center channel, so no dialogue)"},
   {"cheats","1","1 = run the cheat codes that are on (Atmosphere format, <game>_data/cheats/<build id>.txt; turn them\n;   on and off in the in-game menu, Cheats page)"},
   {"fov","100","Field of view in percent of the game's own (60-160, applies live). Needs a FOV hook for this game\n;   build (beyond/fov_hooks.txt)"},
   {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},

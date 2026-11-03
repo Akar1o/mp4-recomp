@@ -46,10 +46,24 @@ typedef struct {
 } AReverb;
 typedef struct {u8 type,enabled,is_new;u32 mix;u8 param[0xA0];AReverb*rv;} AEffect;
 #define AE 32
+/* Splitters: a voice whose mix id is "none" sends each of its channels to the splitter's destinations instead,
+   channel c to destinations c, c+channels, c+2*channels... Each destination names a mix and a volume per buffer of
+   it. Metroid Prime 4 routes every playing voice this way (5 splitters, 141 destinations in use); without them the
+   voices went straight into the final mix with their direct-mix gains (zero for these), skipping the submixes and
+   their reverb: most sounds were missing and the rest came out far too quiet. Updates carry only what changed, so
+   the state is kept here. Wire layout (REV15): header 0x20 ('SNDH', info count, destination count), then infos
+   ('SNDI', id, sample rate, count, destination ids; 0x1C+4*count bytes), then 0xA8-byte destinations ('SNDD', id,
+   24 volumes at 8, mix id at 0x68, in use at 0x9C) */
+#define ASI 256
+#define ASD 1024
+#define ASL 96
+typedef struct {u32 count;u16 ids[ASL];} ASplit;
+typedef struct {u32 mix;u8 used;float volume[24];} ADest;
 typedef struct {
   AVoice *voices;AMix mix[AM];u8 resources[AR][0x70];u8 resource_valid[AR];
   float *samples;u8 sink_inputs[AC];u32 sink_count;u64 ticks;int logged_voice,logged_routes;
   float downmix[4];AEffect effect[AE];u32 effect_count;
+  ASplit split[ASI];ADest dest[ASD];
 } ARenderer;
 static void atrace_voice(const char*event,u32 id,AVoice*v,const u8*vi,const u8*wb){
   static int checked;static FILE*f;if(!checked){checked=1;const char*p=getenv("SWR_AUDIO_VOICE_CSV");if(p&&*p){f=fopen(p,"w");if(f)fprintf(f,"ns,event,id,played,consumed,queued,state,rate,format,address,bytes,start,end,loop,eos,context,context_bytes,first16\n");}}
@@ -177,6 +191,15 @@ static void aroutes(ARenderer*r,const u32*ih,const u8*input,u64 size){
   {u64 eo=off+ih[4]+(u64)ih[3];u32 n=ih[5]/0xC0;if(n>AE)n=AE;if(eo+(u64)n*0xC0<=size){r->effect_count=n;
     for(u32 i=0;i<n;i++){const u8*e=input+eo+i*0xC0;AEffect*f=&r->effect[i];if(f->type!=e[0]||e[1]){if(f->rv)memset(f->rv,0,sizeof *f->rv);}
       f->type=e[0];f->is_new=e[1];f->enabled=e[2];f->mix=au32(e+4);memcpy(f->param,e+0x20,0xA0);}}}
+  {u64 so=off+ih[4]+(u64)ih[3]+ih[5];static int dumped;const char*dp=getenv("SWR_AUDIO_SPLIT_DUMP");
+    if(dp&&dumped<60&&ih[9]>=0x20&&so+ih[9]<=size&&au32(input+so+4)){dumped++;FILE*f=fopen(dp,dumped==1?"wb":"ab");if(f){u32 n=ih[9];fwrite(&n,4,1,f);fwrite(input+so,1,n,f);fclose(f);}}}
+  {u64 so=off+ih[4]+(u64)ih[3]+ih[5];if(ih[9]>=0x20&&so+ih[9]<=size&&!memcmp(input+so,"SNDH",4)){
+      const u8*sp=input+so,*se=sp+ih[9];u32 ni=au32(sp+4),nd=au32(sp+8);const u8*q=sp+0x20;
+      for(u32 i=0;i<ni&&q+0x10<=se;i++){if(memcmp(q,"SNDI",4))break;u32 id=au32(q+4),cnt=au32(q+12);if(cnt>4096||q+0x10+4ull*cnt>se)break;
+        if(id<ASI){ASplit*t=&r->split[id];t->count=cnt>ASL?ASL:cnt;for(u32 k=0;k<t->count;k++)t->ids[k]=(u16)au32(q+0x10+4*k);}
+        q+=0x1C+4ull*cnt;if(q+4<=se&&memcmp(q,"SNDI",4)&&memcmp(q,"SNDD",4)){const u8*z=q;while(z+4<=se&&z<q+64&&memcmp(z,"SNDI",4)&&memcmp(z,"SNDD",4))z+=4;q=z;}}
+      for(u32 i=0;i<nd&&q+0xA8<=se;i++,q+=0xA8){if(memcmp(q,"SNDD",4))break;u32 id=au32(q+4);if(id>=ASD)continue;ADest*d=&r->dest[id];
+        d->mix=au32(q+0x68);d->used=q[0x9C];for(int k=0;k<24;k++)d->volume[k]=af32(q+8+k*4);}}}
   off+=ih[4]+(u64)ih[3]+ih[5]+ih[9];if(off+ih[6]>size)return;
   u32 count=ih[6]/0x930;const u8*p=input+off;
   if(ih[6]>=0x20&&(ih[6]-0x20)%0x930==0){count=au32(p+4);if(count>(ih[6]-0x20)/0x930)return;p+=0x20;}
@@ -270,7 +293,8 @@ static void aroute_trace(ARenderer*r,const u32*ih,const u8*input,u64 size,const 
       AT_ADD(" ch%u room%.0f refl%.0f rev%.0f dry%.2f st%u]",au32(q+0xE)&0xFFFF,af32(q+0x28),af32(q+0x2C),af32(q+0x30),af32(q+0x44),q[0x48]);}
     if(e[0]==2){u32 c=au32(e+0x20+48);if(c>24)c=24;AT_ADD("[");for(u32 k=0;k<c;k++)AT_ADD("%d>%d ",(signed char)e[0x20+k],(signed char)e[0x20+24+k]);AT_ADD("]");}}
   off+=ih[5];
-  if(ih[9]>=0x20){const u8*h=input+off;AT_ADD(" | split %.4s info %u data %u",(const char*)h,au32(h+4),au32(h+8));}
+  if(ih[9]>=0x20){const u8*h=input+off;AT_ADD(" | split %.4s info %u data %u",(const char*)h,au32(h+4),au32(h+8));
+}
   AT_ADD(" | mixes");for(u32 id=0;id<AM;id++){AMix*m=&r->mix[id];if(!m->valid||!m->used)continue;AT_ADD(" M%u>%d v%.2f c%u",id,(int)m->dest,m->volume,m->count);
     if(id){AT_ADD("{");for(u32 a=0;a<m->count;a++)for(u32 b=0;b<24;b++)if(m->matrix[a][b])AT_ADD("%u>%u:%.2f ",a,b,m->matrix[a][b]);AT_ADD("}");}}
   u32 hist[8][3];int nh=0;
@@ -304,10 +328,15 @@ void audio_render(SvcObj*o,const u32*ih,const u8*input,u64 size,const u8*voices,
       if(play==1&&v->was_playing){atrace_voice("stop",id,v,vi,NULL);aclear(v,1);memset(v->filter,0,sizeof v->filter);}
       v->was_playing=play!=1;
       if(play==0&&v->nq&&o->u[3]==0&&!g_audio_status_only){active++;u32 rate=au32(vi+0xC);float pitch=af32(vi+0x1C),volume=af32(vi+0x20);if(!rate||rate>192000)rate=48000;if(!(pitch>0)||pitch>8)pitch=1;
-        double step=(double)rate*pitch/48000.0;u32 mix=au32(vi+0x58);if(mix>=AM)mix=0;u32 nc=r->mix[mix].valid?r->mix[mix].count:2;if(nc>24)nc=24;
+        double step=(double)rate*pitch/48000.0;u32 mix=au32(vi+0x58),spl=au32(vi+0x5C);
+        const ASplit*st= mix>=AM&&spl<ASI&&r->split[spl].count? &r->split[spl] : NULL;   /* routed through a splitter */
+        if(mix>=AM)mix=0;u32 nc=r->mix[mix].valid?r->mix[mix].count:2;if(nc>24)nc=24;
         if(!r->logged_voice){r->logged_voice=1;LOG("audio: first voice %u, format %u, %u channels, %u Hz, volume %.3f, mix %u, %u buffers\n",id,vi[0xB],au32(vi+0x18),rate,volume,mix,v->nq);}
         for(int n=0;n<AF&&v->nq;n++){ABuffer*b=&v->q[0];u32 at=(u32)v->position;if(at>=b->frames)at=b->frames-1;u32 next=at+1;if(next>=b->frames)next=b->loop?0:at;float fraction=(float)(v->position-at);
           for(u32 ch=0;ch<b->channels;ch++){float value=b->pcm[at*b->channels+ch]+(b->pcm[next*b->channels+ch]-b->pcm[at*b->channels+ch])*fraction;value=abiquad(v,vi,ch,value)*volume;
+            if(st){for(u32 k=ch;k<st->count;k+=b->channels){if(st->ids[k]>=ASD)continue;const ADest*d=&r->dest[st->ids[k]];if(!d->used||d->mix>=AM||!r->mix[d->mix].valid)continue;
+                u32 dc=r->mix[d->mix].count>24?24:r->mix[d->mix].count;for(u32 dst=0;dst<dc;dst++){float gain=d->volume[dst];if(gain)r->samples[((size_t)d->mix*24+dst)*AF+n]+=value*gain;}}
+              continue;}
             u32 resource=au32(vi+0x140+ch*4);const u8*res=resource<AR&&r->resource_valid[resource]?r->resources[resource]:NULL;
             for(u32 dst=0;dst<nc;dst++){float gain=res?af32(res+4+dst*4):(b->channels==1?1.f:dst==ch?1.f:0.f);if(gain)r->samples[((size_t)mix*24+dst)*AF+n]+=value*gain;}}
           v->position+=step;v->played_fraction+=step;u64 whole=(u64)v->played_fraction;v->played+=whole;v->played_fraction-=whole;

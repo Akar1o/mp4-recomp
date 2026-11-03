@@ -257,7 +257,7 @@ static AVCodecContext* ff_ctx(void){
   AVCodecContext* c=ff.alloc(ff.codec); if(!c) return NULL;
   c->thread_count=1; c->flags|=AV_CODEC_FLAG_LOW_DELAY;
   if(ff.hwdev){ c->hw_device_ctx=ff.buf_ref(ff.hwdev); c->get_format=ff_get_format; }
-  if(ff.open(c,ff.codec,NULL)<0){ LOG("video: FFmpeg H.264 decoder could not be opened\n"); return NULL; }
+  { u64 t0=plat_ns(); int r=ff.open(c,ff.codec,NULL); LOG("video: H.264 decoder opened in %.1f ms\n",(plat_ns()-t0)/1e6); if(r<0){ LOG("video: FFmpeg H.264 decoder could not be opened\n"); return NULL; } }
   return g_ffc[g_stream]=c; }
 #endif
 

@@ -89,7 +89,10 @@ static void pad_poll(u64* b, i32* lx, i32* ly, i32* rx, i32* ry){
   static const struct { int sdl, bit; } m[]={{1,0},{0,1},{3,2},{2,3},{7,4},{8,5},{9,6},{10,7},{6,10},{4,11},{13,12},{11,13},{14,14},{12,15}};
   for(unsigned i=0;i<sizeof m/sizeof m[0];i++) if(sdl.Button(g,m[i].sdl)) *b|=1ull<<m[i].bit;
   if(sdl.Button(g,5)) *b|=1ull<<30;   /* Guide / Home: the in-game menu only, never the game (video_poll) */
-  if(sdl.Axis(g,4)>7700) *b|=1ull<<8; if(sdl.Axis(g,5)>7700) *b|=1ull<<9;
+  { i32 lt=sdl.Axis(g,4), rt=sdl.Axis(g,5); if(lt>7700) *b|=1ull<<8; if(rt>7700) *b|=1ull<<9;
+    /* log trigger presses (first 40) and the strongest pull seen, for "ZL does nothing" reports */
+    static int was, said; static i32 maxlt; if(lt>maxlt){ maxlt=lt; if(said<40 && (maxlt>=32000 || maxlt%4096<64)) { said++; LOG("controller: left trigger reached %d of 32767 (ZL at 7700)\n",maxlt); } }
+    int now= lt>7700; if(now!=was && said<400){ said++; LOG("controller: ZL (left trigger) %s, value %d\n",now? "pressed" : "released",lt); } was=now; }
   /* SDL's Y axes point down, the Switch's up */
   i32 x=sdl.Axis(g,0), y=-(i32)sdl.Axis(g,1), x2=sdl.Axis(g,2), y2=-(i32)sdl.Axis(g,3);
   if(y>32767) y=32767; if(y2>32767) y2=32767;
@@ -343,6 +346,13 @@ void video_poll(void){
   if(g_press && el>=g_press_at && el<g_press_at+g_press_len) b|=g_press;
   if(g_script[0]){ const char* p=g_script; while(*p){ u64 t=strtoull(p,(char**)&p,10); if(*p!=':') break; p++; u64 m=strtoull(p,(char**)&p,16); if(el>=t && el<t+g_press_len) b|=m; if(*p==',') p++; } }
   test_input_apply(&b,&lx,&ly,&rx,&ry);
+  /* every session's input goes to input_record.csv (the SWR_TEST_SCRIPT replay format, a row per change), so a
+     problem spot can be reached again by replaying the route there. SWR_NO_INPUT_RECORD=1: off */
+  if(!test_replay){ static FILE* rf; static int rinit; static u64 pb=~0ull; static i32 plx=1<<30, ply, prx, pry;
+    if(!rinit){ rinit=1; if(!getenv("SWR_NO_INPUT_RECORD")){ extern char g_exedir[]; char p[1200]; snprintf(p,sizeof p,"%sinput_record.csv",g_exedir); rf=fopen(p,"w");
+        if(rf) fprintf(rf,"# guest_frame,hex_buttons,lx,ly,rx,ry (replay: SWR_TEST_SCRIPT=this file)\n"); } }
+    if(rf && (b!=pb || lx!=plx || ly!=ply || rx!=prx || ry!=pry)){ fprintf(rf,"%d,%llx,%d,%d,%d,%d\n",g_frames,(unsigned long long)b,lx,ly,rx,ry); pb=b; plx=lx; ply=ly; prx=rx; pry=ry;
+      static int nfl; if(++nfl%64==0) fflush(rf); } }
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; }   /* the menu has the controller (and the game neutral input) */
   { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */

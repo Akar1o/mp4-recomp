@@ -623,7 +623,7 @@ typedef void (APIENTRY *T_glGenerateMipmap)(GLenum target);
 T_glGenerateMipmap r_glGenerateMipmap;
 typedef struct { GLenum target;  } S_glGenerateMipmap;
 static void e_glGenerateMipmap(void* p){ S_glGenerateMipmap* qa_=(S_glGenerateMipmap*)p; r_glGenerateMipmap(qa_->target); }
-void APIENTRY q_glGenerateMipmap(GLenum target){ if(t_glq_direct){ r_glGenerateMipmap(target); return; } S_glGenerateMipmap qa_; qa_.target=target;  glq_sync(e_glGenerateMipmap,&qa_);  }
+void APIENTRY q_glGenerateMipmap(GLenum target){ if(t_glq_direct){ r_glGenerateMipmap(target); return; } S_glGenerateMipmap* qa_=(S_glGenerateMipmap*)glq_alloc(sizeof(S_glGenerateMipmap),0,e_glGenerateMipmap); qa_->target=target; glq_commit(); }   /* queued, not a round trip: no result and no client memory, and the GPU thread waited up to 25 ms for it when the GL thread was busy (edited by hand: glq/gen.py is not in this tree) */
 typedef void (APIENTRY *T_glClipControl)(GLenum origin, GLenum depth);
 T_glClipControl r_glClipControl;
 typedef struct { GLenum origin; GLenum depth; } A_glClipControl;

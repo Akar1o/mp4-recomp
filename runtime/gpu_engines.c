@@ -109,13 +109,16 @@ static void query_get(GpuChannel* ch, u32* r, int base, u32 v){
   u64 addr=((u64)(r[base]&0xFF)<<32)|r[base+1]; u32 seq=r[base+2];
   u32 op=v&3;
   if(op==0){ /* release */
+    { extern void gpu_gl_gw_sync(void); gpu_gl_gw_sync(); }   /* counters the game reads once this is released */
     if(((v>>4)&1) || ((v>>28)&1)) gmem_w32(addr,seq);
     else { u64 q[2]={seq,gpu_ticks()}; gmem_write(addr,q,16); }
   } else if(op==1){ /* acquire */
     u64 end=plat_ns()+1000000000ull;
     while(gmem_r32(addr)!=seq && plat_ns()<end) plat_yield();
   } else if(op==2){ /* counter */
-    u32 sel=(v>>23)&31; u64 val= sel==0? 0 : (sel==1? g_draws*3 : 1000);
+    u32 sel=(v>>23)&31;
+    { extern int gpu_gl_oq_report(u64,int); extern int g_gl; if(sel==21 && g_gl && gpu_gl_oq_report(addr,(v>>28)&1)) return; }   /* samples passed: measured */
+    u64 val= sel==0? 0 : (sel==1? g_draws*3 : 1000);
     if((v>>28)&1) gmem_w32(addr,(u32)val); else { u64 q[2]={val,gpu_ticks()}; gmem_write(addr,q,16); }
   }
 }
@@ -133,7 +136,7 @@ void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last){
     switch(m){
       case 0x586: keep=(v>>26)&1; break;
       case 0x585: case 0x35D: case 0x35E: case 0x5F7: case 0x5F8: keep=1; break;
-      case 0x45: case 0x46: case 0x47: case 0x48: case 0x6C: case 0x6D: case 0xB2: case 0x674: case 0x6C3:
+      case 0x45: case 0x46: case 0x47: case 0x48: case 0x6C: case 0x6D: case 0xB2: case 0x674: case 0x6C3: case 0x54C:
       case 0x904: case 0x90C: case 0x914: case 0x91C: case 0x924: keep=0; break;
       default: keep= (m<0x8E4 || m>0x8F3) && R3(m)==v; break; }
     if(!keep || g_pd.ch!=ch) r3d_pending_flush(); }
@@ -147,6 +150,7 @@ void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last){
     case 0x6D: i2m_data(ch,v); break;
     case 0xB2: if(v&(1u<<20)){ extern void gpu_gl_stream_incr(u32); gpu_gl_stream_incr(v&0xFFFF); } break;              /* SyncInfo */
     case 0x674: r3d_clear(ch,v); break;                                    /* ClearBuffers */
+    case 0x54C: { extern void gpu_gl_oq_reset(void); extern int g_gl; if((v&0xFF)==1 && g_gl) gpu_gl_oq_reset(); } break;   /* CounterReset: samples passed */
     case 0x6C3: query_get(ch,ch->r3d,0x6C0,v); break;
     case 0x585: { /* END: flush */
       u32 topo=R3(0x586)&0xFFFF; int idx= R3(0x5F8)!=0;
@@ -222,6 +226,7 @@ void fermi2d_method(GpuChannel* ch, u32 m, u32 v){
     /* CENTER origin (sample_mode bit0 == 0): coords address texel centers */
     if(!(r[0x223]&1)){ sx-=sdx*0.5; sy-=sdy*0.5; if(sx<0) sx=0; if(sy<0) sy=0; }
     if(r3d_blit(&src,&dst,dx0,dy0,dw,dh,sx,sy,sdx,sdy)) return;
+    { static int said; if(said<20){ said++; LOG("2d: CPU blit %dx%d: src %llx fmt %x %ux%u %s -> dst %llx fmt %x %ux%u %s (scale %.3f,%.3f)\n",dw,dh,(unsigned long long)src.addr,src.format,src.width,src.height,src.linear?"pitch":"bl",(unsigned long long)dst.addr,dst.format,dst.width,dst.height,dst.linear?"pitch":"bl",sdx,sdy); } }
     extern int g_gl; extern void gpu_gl_rt_flush(u64); extern void gpu_gl_rt_reload(u64);
     if(g_gl){ gpu_gl_rt_flush(src.addr); gpu_gl_rt_flush(dst.addr); }
     u32 bpp=fmt_bpp_2d(dst.format), sbpp=fmt_bpp_2d(src.format); if(bpp!=sbpp) bpp=sbpp;
@@ -320,6 +325,10 @@ void dma_method(GpuChannel* ch, u32 m, u32 v){
     for(u32 y=0;y<lines;y++) for(u32 x=0;x<line_len;){ u32 xs=sx*(remap?bpp:1)+x, xd=dx*(remap?bpp:1)+x, n=16-(xs&15), m=16-(xd&15); if(m<n) n=m; if(n>line_len-x) n=line_len-x;
       u8 b[16]; gmem_read(src+bl_offset(xs,sy+y,sz_,swb,sh,sbh,sbd),b,n); gmem_write(dst+bl_offset(xd,dy+y,dz,dwb,dh,dbh,dbd),b,n); x+=n; }
   }
+  if(g_gl){ extern void gpu_gl_dma_written(u64,u64); u64 wl;   /* the destination range, for textures that sample it */
+    if(dst_linear) wl= multi && lines? (u64)(lines-1)*pitch_out+line_len : line_len;
+    else { u64 wbb=(u64)dw*(remap?bpp:1), gh=8ull<<dbh, gd=1ull<<dbd; wl=((wbb+63)&~63ull)*((dh+gh-1)/gh*gh)*((dz/gd+1)*gd); }
+    gpu_gl_dma_written(dst,wl); }
   { extern u64 plat_ns(void); u64 t0=plat_ns(); if(g_gl) gpu_gl_rt_reload(dst); u64 dt=plat_ns()-t0; if(dt>10000000ull){ static int said; if(said<30){ said++; LOG("dma: reload of %llx took %.1f ms\n",(unsigned long long)dst,dt/1e6); } } }
   /* completion semaphore */
   u32 sem=(v>>3)&3;
