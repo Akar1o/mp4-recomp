@@ -1,4 +1,4 @@
-"""Turn the installed (verified) Dread v2.1.0 build sources into the patch set setup applies to fresh codegen output.
+"""Turn the installed (verified) Metroid Prime 4 Beyond build sources into the patch set setup applies to fresh codegen output.
 Usage: make_patches.py PRISTINE_BUILD_DIR INSTALLED_BUILD_DIR OUT.json FILE...
 
 Format 2 carries no generated code: per file, the SHA-256 of the pristine codegen output (deterministic for the

@@ -53,7 +53,10 @@ void Paths::init(const char* dir, const char* name) {
     exe = join(exedir, exename + ".exe"); ini = join(exedir, exename + ".ini"); data = join(exedir, exename + "_data");
     code = join(exedir, exename + "_code.dll"); build = join(exedir, exename + "_build"); recompiler = join(exedir, "recompiler");
     setup_ok = join(data, "setup.ok");
-    wchar_t* ad = nullptr; if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &ad) == S_OK) { appdata = join(utf8(ad), "MetroidBeyondRecomp"); CoTaskMemFree(ad); }
+    wchar_t* ad = nullptr; if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &ad) == S_OK) { appdata = join(utf8(ad), "MetroidPrime4Recomp"); std::string old = join(utf8(ad), "MetroidBeyondRecomp"); CoTaskMemFree(ad);
+        // earlier builds used MetroidBeyondRecomp: moved once
+        if (GetFileAttributesW(wide(appdata).c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(wide(old).c_str()) != INVALID_FILE_ATTRIBUTES &&
+            !MoveFileW(wide(old).c_str(), wide(appdata).c_str())) appdata = old; }
 }
 
 // ---------------------------------------------------------------- INI
@@ -150,7 +153,7 @@ GameCheck check_installed() {
     GameCheck g;
     g.code_ok = file_exists(P.code) && file_size(P.code) > 50 * 1024 * 1024;
     g.exefs_ok = file_exists(join(P.data, "exefs\\main")) && file_exists(join(P.data, "exefs\\main.npdm"));
-    // Metroid Prime 4's RomFS: Worlds/ plus Kernel.pak (Dread checked system/ and packs/, which this game does not have)
+    // Metroid Prime 4's RomFS: Worlds/ plus Kernel.pak
     g.romfs_ok = dir_exists(join(P.data, "romfs\\Worlds")) && file_exists(join(P.data, "romfs\\Kernel.pak"));
     g.data_ok = g.exefs_ok && g.romfs_ok;
     g.setup_ok = file_exists(P.setup_ok);
@@ -232,9 +235,7 @@ static std::string json_str(const std::string& s, const char* key) {
     if (p < s.size() && s[p] == '"') { std::string out; for (size_t i = p + 1; i < s.size() && s[i] != '"'; i++) { if (s[i] == '\\' && i + 1 < s.size()) { i++; out += s[i] == '\\' ? '\\' : s[i]; } else out += s[i]; } return out; }
     size_t e = s.find_first_of(",}\r\n", p); return s.substr(p, e - p);
 }
-static std::string old_json_path() {
-    wchar_t* ad = nullptr; std::string r; if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &ad) == S_OK) { r = join(utf8(ad), "DreadLauncher\\config.json"); CoTaskMemFree(ad); } return r;
-}
+static std::string old_json_path() { return {}; }   // no earlier launcher for this game to take settings from
 OldInstall describe_old(const std::string& exe) {
     OldInstall o; o.exe = exe; std::string base = exe.substr(0, exe.size() - 4), dir = exe.substr(0, exe.find_last_of("\\/"));
     if (file_exists(base + ".ini")) o.ini = base + ".ini";
@@ -268,7 +269,7 @@ MigrateResult migrate(const OldInstall& o, bool settings, bool saves, bool mods,
         if (!o.json.empty()) {   // the Python launcher's own preferences
             std::string js = read_text(o.json);
             auto flag = [&](const char* jk, const char* ik) { std::string v = json_str(js, jk); if (v == "true" || v == "false") { dst.set("Launcher", ik, v == "true" ? "1" : "0"); n++; } };
-            flag("sync_shaders", "wait_for_shaders"); flag("loading_60fps", "loading_60fps"); flag("cutscenes_60fps", "cutscenes_60fps"); flag("controller_navigation", "launcher_nav");
+            flag("sync_shaders", "wait_for_shaders"); flag("controller_navigation", "launcher_nav");
             std::string pr = json_str(js, "controller_prompts");
             if (!pr.empty()) { for (auto& ch : pr) ch = (char)tolower((unsigned char)ch); dst.set("Launcher", "launcher_prompts", pr == "automatic" ? "auto" : pr); }
             size_t lb = js.find("\"launcher_bindings\"");
@@ -328,7 +329,7 @@ bool backup_saves(std::string* out, std::string* err) {
     if (dir_size(src) != before) { if (err) *err = "Saves changed during the backup. Close the game and try again."; return false; }
     std::string z = stored_zip(es);
     make_dirs(backups_dir());
-    std::string path = join(backups_dir(), "Metroid-Beyond-saves-" + now_stamp() + ".zip");
+    std::string path = join(backups_dir(), "MP4-Recomp-saves-" + now_stamp() + ".zip");
     if (!write_text(path, z)) { if (err) *err = "Could not write " + path; return false; }
     std::string back = read_text(path);   // verify: same bytes, every entry's CRC still matches
     if (back != z) { if (err) *err = "Backup verification failed."; DeleteFileW(wide(path).c_str()); return false; }
@@ -350,7 +351,7 @@ bool make_report(const std::string& info, std::string* out, std::string* err) {
     for (auto& f : files) { std::string p = join(P.exedir, f); if (!file_exists(p)) continue; ZipEntry e; e.name = f; e.data = read_text(p); es.push_back(e); }
     if (es.size() < 2) { if (err) *err = "There are no logs yet. Start the game once, then try again."; return false; }
     make_dirs(reports_dir());
-    std::string path = join(reports_dir(), "Metroid-Beyond-report-" + now_stamp() + ".zip");
+    std::string path = join(reports_dir(), "MP4-Recomp-report-" + now_stamp() + ".zip");
     if (!write_text(path, stored_zip(es))) { if (err) *err = "Could not write " + path; return false; }
     if (out) *out = path; return true;
 }

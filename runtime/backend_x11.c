@@ -355,7 +355,6 @@ void video_poll(void){
       static int nfl; if(++nfl%64==0) fflush(rf); } }
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; }   /* the menu has the controller (and the game neutral input) */
-  { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
 }
 

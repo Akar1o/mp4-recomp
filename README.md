@@ -1,8 +1,7 @@
-# Metroid Prime 4: Beyond — native Linux build (AppImage)
+# Metroid Prime 4 Recomp — native Linux build (AppImage)
 
-A native PC build of **your own copy** of *Metroid Prime 4: Beyond* for Linux, packaged as a single AppImage. It is a
-fork of [Metroid Dread Recomp](https://github.com/DaniSald/Metroid-Dread-Recomp), built on the SwitchRecomp runtime by
-MZ Labs: the game's Switch code is recompiled ahead of time into a native Linux library on your machine, and the
+A native PC build of **your own copy** of *Metroid Prime 4: Beyond* for Linux, packaged as a single AppImage. It is built
+on the SwitchRecomp runtime by MZ Labs: the game's Switch code is recompiled ahead of time into a native Linux library on your machine, and the
 Switch GPU's work is translated to OpenGL 4.6.
 
 This release is the result of a long stretch of play-testing and fixing: the game boots, plays, scans, sounds right and
@@ -57,16 +56,16 @@ Everything that changed is listed below.
 
 ## Install and play
 
-1. Download `Metroid_Prime_4_Beyond-x86_64.AppImage` from the release and make it executable:
+1. Download `Metroid_Prime_4_Recomp-x86_64.AppImage` from the release and make it executable:
 
    ```bash
-   chmod +x Metroid_Prime_4_Beyond-x86_64.AppImage
+   chmod +x Metroid_Prime_4_Recomp-x86_64.AppImage
    ```
 
 2. Run it:
 
    ```bash
-   ./Metroid_Prime_4_Beyond-x86_64.AppImage
+   ./Metroid_Prime_4_Recomp-x86_64.AppImage
    ```
 
 3. **First run:** the setup screen asks for your extracted game folder (it can hold `exefs` and `romfs` folders, or the
@@ -74,7 +73,9 @@ Everything that changed is listed below.
    into the install folder and compiles the game with the bundled GCC (a few minutes on a fast CPU).
 4. Press **Play**. The first launch builds shaders in the background; later launches load them from the cache.
 
-Everything is installed to `~/.local/share/MetroidBeyondRecomp` (set `METROID_BEYOND_HOME` to use another folder).
+Everything is installed to `~/.local/share/MetroidPrime4Recomp` (set `MP4_RECOMP_HOME` to use another folder). An
+install from an earlier build in `~/.local/share/MetroidBeyondRecomp` is moved there on the first start, saves and
+shader caches included.
 Settings are in `Metroid Prime 4 Beyond.ini` there, rewritten with every option explained on the first start.
 
 ## Saves
@@ -82,7 +83,7 @@ Settings are in `Metroid Prime 4 Beyond.ini` there, rewritten with every option 
 Saves are plain files in:
 
 ```
-~/.local/share/MetroidBeyondRecomp/Metroid Prime 4 Beyond_data/save/user/
+~/.local/share/MetroidPrime4Recomp/Metroid Prime 4 Beyond_data/save/user/
 ```
 
 **Using your Switch save:** export it with a save manager on a homebrew-enabled Switch (JKSV or Checkpoint), close the
@@ -246,7 +247,7 @@ from the same save), traced to a root cause and checked again in the game.
 - Prime 4 setup: title and build-ID checks, RomFS layout and manifest verification.
 - `fsp-srv` 205 (`OpenDataStorageWithProgramIndex`): the game mounts its RomFS.
 - HID: player 1 reports a single controller style, fixing the six-axis abort at boot.
-- The Play screen checks for Prime 4's data (it looked for Dread's) and shows Prime 4's titles.
+- The Play screen checks for Prime 4's data and shows Prime 4's titles.
 - Cheats in Atmosphere / dmnt format, toggled per cheat in the in-game menu.
 - AMD FidelityFX FSR 1 upscaling with a sharpness slider.
 
@@ -283,11 +284,11 @@ from the same save), traced to a root cause and checked again in the game.
 
 ## Troubleshooting
 
-- The log is `~/.local/share/MetroidBeyondRecomp/Metroid Prime 4 Beyond.log` (the last five are kept). Attach it to bug
+- The log is `~/.local/share/MetroidPrime4Recomp/Metroid Prime 4 Beyond.log` (the last five are kept). Attach it to bug
   reports.
 - Screenshots with F3; a frame trace with F5 at the moment something looks wrong helps most.
 - Black videos: install OpenH264 or FFmpeg.
-- Rendering glitches: delete `~/.local/share/MetroidBeyondRecomp/shader_cache` once to rule out a stale cache (the
+- Rendering glitches: delete `~/.local/share/MetroidPrime4Recomp/shader_cache` once to rule out a stale cache (the
   next launch rebuilds it).
 
 ## Advanced switches
@@ -321,12 +322,12 @@ bash linux/setup_and_build_runtime.sh
 bash linux/make_appimage.sh
 ```
 
-`make_appimage.sh` produces `linux/dist/Metroid_Prime_4_Beyond-x86_64.AppImage`. To run from the source tree without
+`make_appimage.sh` produces `linux/dist/Metroid_Prime_4_Recomp-x86_64.AppImage`. To run from the source tree without
 the AppImage instead: `bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]`, then `bash linux/run.sh`.
 
 ## Credits
 
-- **yozander2009-stack** and the Metroid Dread Recomp contributors: the project this is forked from
+- **yozander2009-stack** and contributors: the recompiled runtime and launcher this port is built from
 - **MZ Labs**: SwitchRecomp (Apache-2.0); "SwitchRecomp by MZ Labs" and NOTICE.txt must be kept
 - **ScarletNX**: the native Vulkan renderer (GPL-3.0)
 - **AMD**: FidelityFX Super Resolution 1 (MIT)
@@ -339,7 +340,7 @@ the AppImage instead: `bash linux/setup_game.sh GAME_FOLDER [UPDATE_FOLDER]`, th
 The released program is distributed under **GPL-3.0** (`LICENSE`), because it contains the ScarletNX renderer; its
 source is this repository. Each source file keeps its own licence (`LICENSE.txt` and `NOTICE.txt` for SwitchRecomp's
 Apache-2.0; Apache-2.0 and MIT code is GPL-3.0-compatible). The licence texts are also inside the AppImage under
-`usr/share/metroid-beyond/licenses`.
+`usr/share/metroid-prime-4-recomp/licenses`.
 
-*Metroid Prime 4: Beyond* and *Metroid Dread* are © Nintendo. This project is not affiliated with or endorsed by
+*Metroid Prime 4: Beyond* is © Nintendo. This project is not affiliated with or endorsed by
 Nintendo.

@@ -8,8 +8,8 @@ KShmem* kshmem_new(u64 size, const char* name);
 u8* kshmem_ptr(KShmem* s);
 
 /* The language the game is given: one it has. A Switch never hands a game a language it doesn't list; it picks
-   the nearest it has. Metroid Dread has no Portuguese (9, pt-BR 17): its text and button glyphs went missing
-   (GitHub issue #15), so those get English (US), as on a console */
+   the nearest it has. Portuguese (9, pt-BR 17) gets English (US): a game
+   without it loses its text and button glyphs, and Metroid Prime 4's language list is not known here */
 static int game_lang(void){ extern int g_opt_lang; int l=g_opt_lang; return l==9 || l==17? 1 : l; }
 /* ================================================================ sm */
 static int sm_disp(SvcObj* o, IpcCtx* c){

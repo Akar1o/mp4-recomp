@@ -6,7 +6,7 @@ Thanks for helping. This is a work in progress, so bug reports with logs are as 
 
 Use the **Bug report** form on the Issues page. Please attach:
 
-- `Metroid Dread.log` from the game folder (the crash message names it), and `performance.txt` for stutter or slowdowns;
+- `Metroid Prime 4 Beyond.log` from the game folder (`~/.local/share/MetroidPrime4Recomp` on Linux) (the crash message names it), and `performance.txt` for stutter or slowdowns;
 - your CPU, GPU, RAM, Windows version, and the renderer you use (OpenGL, Vulkan output or Native Vulkan);
 - the version (Play screen > Updates, or the first line of `update.txt` in the game folder).
 

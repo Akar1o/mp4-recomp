@@ -105,7 +105,7 @@ void opt_row(const char* key) {
     default: {
         float v = (float)atof(cur.c_str());
         std::string t = o->type == OPT_INT ? fmt("%d", (int)lroundf(v)) : fmt("%.2f", v);
-        if (!strcmp(key, "resolution")) { bool d = val("docked") == "1"; std::string a = val("aspect"); t = res_text(v, d, a.c_str()); }
+        if (!strcmp(key, "resolution")) { bool d = val("docked") == "1"; t = res_text(v, d, ""); }
         if (!strcmp(key, "mouse_sensitivity")) t = fmt("%d%%", (int)lroundf(v));
         if (!strcmp(key, "volume") || !strcmp(key, "rumble")) t = (int)v == 0 ? "Off" : fmt("%d%%", (int)lroundf(v));
         if (!strcmp(key, "stick_deadzone")) t = fmt("%d%%", (int)(v * 100 / 32767));
@@ -116,12 +116,12 @@ void opt_row(const char* key) {
 void tab_content(int t) {
     switch (t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
-            opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
+            opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("language"); break;
     case 1: section("UPSCALING"); opt_row("resolution"); opt_row("upscaler"); if (val("upscaler") == "fsr") opt_row("fsr_sharpness");
             section("QUALITY"); opt_row("antialiasing"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
     case 2: section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps");
             section("CAMERA"); opt_row("fov"); if (!fov_available()) help_text("No FOV hook for this game build yet: the slider has no effect until one is added to beyond/fov_hooks.txt.");
-            section("LOADING"); opt_row("fast_loading"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
+            section("RIDES"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
     case 3: {
         section("CHEATS"); opt_row("cheats");
         int n = cheats_count();
@@ -144,7 +144,7 @@ void tab_content(int t) {
                                {"Fast forward (if on)", "Tab, or L3 + R3"}, {"Quit", "Esc"}, {"Move / aim", "W A S D / I J K L"}, {"A B X Y", "X  Z  C  V"},
                                {"L R ZL ZR", "Q  E  1  3"}, {"+ / -", "Enter / Backspace"}};
         for (auto& r : kb) row_text(r[0], r[1]);
-        section("ABOUT"); help_text("Metroid Prime 4 Beyond recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; 60 FPS cutscenes by theboy181; Dear ImGui; SDL2. Full credits on the Play screen.");
+        section("ABOUT"); help_text("Metroid Prime 4 Recomp: Metroid Prime 4 Beyond recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; Dear ImGui; SDL2. Full credits on the Play screen.");
     } }
 }
 

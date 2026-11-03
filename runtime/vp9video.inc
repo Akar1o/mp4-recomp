@@ -14,7 +14,7 @@ typedef struct { u32 off, size; u64 h; u8* pixels; u32 w,hgt,bytes; u64 cached_u
 typedef struct {
   const char* path; u8* data; u64 dlen; V9F* fr; u32 nfr, cap,cache_count; int cur,dec_cur,last_visible; int ctx_ok; vpx_codec_ctx_t ctx; u64 used;
 } V9Vid;
-#define V9N 8           /* videos indexed at once; Dread plays up to 3 together and returns to older ones */
+#define V9N 8           /* videos indexed at once; a game can play several together and return to older ones */
 static V9Vid g_v9[V9N]; static u64 g_v9clk; static V9Vid* g_v9act;
 static u32 g_v9_slen_off;     /* which offset of the picture setup holds the bitstream size (found at run time) */
 

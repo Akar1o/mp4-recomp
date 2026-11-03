@@ -45,7 +45,7 @@ if "%2"=="" (
   exit /b 1
 )
 echo [4/4] Release %2
-python\python.exe dread\make_release.py release release\%2 --version %2 --exe bin\runtime_win64_win32.exe || goto :fail
+python\python.exe beyond\make_release.py release release\%2 --version %2 --exe bin\runtime_win64_win32.exe || goto :fail
 echo Done: release\%2
 exit /b 0
 

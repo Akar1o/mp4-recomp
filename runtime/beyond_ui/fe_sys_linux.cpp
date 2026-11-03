@@ -67,7 +67,10 @@ void Paths::init(const char* dir, const char* name) {
     // the recompiler (Python scripts, patches, GCC): the AppImage passes its own copy, a build from source has it next to the game
     const char* r = getenv("SWR_RECOMPILER"); recompiler = r && *r ? r : join(exedir, "recompiler");
     setup_ok = join(data, "setup.ok");
-    appdata = join(data_home(), "MetroidBeyondRecomp");
+    appdata = join(data_home(), "MetroidPrime4Recomp");
+    // earlier builds used MetroidBeyondRecomp: moved once (the AppImage's AppRun moves the same folder before this runs)
+    { std::string old = join(data_home(), "MetroidBeyondRecomp"); struct stat st;
+      if (stat(appdata.c_str(), &st) != 0 && stat(old.c_str(), &st) == 0 && rename(old.c_str(), appdata.c_str()) != 0) appdata = old; }
 }
 
 // ---------------------------------------------------------------- INI (the same line-preserving editor as fe_sys.cpp)
@@ -227,7 +230,7 @@ GameCheck check_installed() {
     GameCheck g;
     g.code_ok = file_exists(P.code) && file_size(P.code) > 50 * 1024 * 1024;
     g.exefs_ok = file_exists(join(P.data, "exefs/main")) && file_exists(join(P.data, "exefs/main.npdm"));
-    // Metroid Prime 4's RomFS: Worlds/ plus Kernel.pak (Dread checked system/ and packs/, which this game does not have)
+    // Metroid Prime 4's RomFS: Worlds/ plus Kernel.pak
     g.romfs_ok = dir_exists(join(P.data, "romfs/Worlds")) && file_exists(join(P.data, "romfs/Kernel.pak"));
     g.data_ok = g.exefs_ok && g.romfs_ok;
     g.setup_ok = file_exists(P.setup_ok);
@@ -332,7 +335,7 @@ bool backup_saves(std::string* out, std::string* err) {
     if (dir_size(src) != before) { if (err) *err = "Saves changed during the backup. Close the game and try again."; return false; }
     std::string z = stored_zip(es);
     make_dirs(backups_dir());
-    std::string path = join(backups_dir(), "Metroid-Beyond-saves-" + now_stamp() + ".zip");
+    std::string path = join(backups_dir(), "MP4-Recomp-saves-" + now_stamp() + ".zip");
     if (!write_text(path, z)) { if (err) *err = "Could not write " + path; return false; }
     std::string back = read_text(path);   // verify: same bytes, every entry's CRC still matches
     if (back != z) { if (err) *err = "Backup verification failed."; unlink(path.c_str()); return false; }
@@ -356,7 +359,7 @@ bool make_report(const std::string& info, std::string* out, std::string* err) {
     for (auto& f : files) { std::string p = join(P.exedir, f); if (!file_exists(p)) continue; ZipEntry e; e.name = f; e.data = read_text(p); es.push_back(e); }
     if (es.size() < 2) { if (err) *err = "There are no logs yet. Start the game once, then try again."; return false; }
     make_dirs(reports_dir());
-    std::string path = join(reports_dir(), "Metroid-Beyond-report-" + now_stamp() + ".zip");
+    std::string path = join(reports_dir(), "MP4-Recomp-report-" + now_stamp() + ".zip");
     if (!write_text(path, stored_zip(es))) { if (err) *err = "Could not write " + path; return false; }
     if (out) *out = path; return true;
 }

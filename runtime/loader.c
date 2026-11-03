@@ -24,29 +24,6 @@ static u8* read_all(const char* path, u64* size){
   FILE* f=fopen(path,"rb"); if(!f) return NULL; fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
   u8* b=malloc(n>0?n:1); if(fread(b,1,n,f)!=(size_t)n){ fclose(f); free(b); return NULL; } fclose(f); *size=(u64)n; return b; }
 
-/* ini ultrawide=1 (or SWR_ULTRAWIDE=1): theboy181's "21:9" patch for Metroid Dread v2.1.0
-   (github.com/theboy181/switch-ptchtxt-mods, commissioned by Nikorasu081): the game's base render size in main's data,
-   main+0x1A1BE18, the docked render size 1600x900 -> 1680x720, so it draws a 21:9 picture. Only applied to that exact main (build id) and
-   only over the expected original bytes.
-   ultrawide=2 (ini aspect=16:10, SWR_ULTRAWIDE=2) uses the same spot for a 16:10 picture: 1440x900, the docked height, which
-   scales exactly to 1280x800 (Steam Deck) and 1920x1200 */
-int g_opt_ultrawide;
-static void dread_ultrawide(const SwrModInfo* mi){
-  static const u8 id[20]={0x64,0x67,0x61,0xF6,0x43,0xAF,0xEB,0xB3,0x79,0xED,0xD5,0xE6,0xA5,0x15,0x1A,0xF2,0xCE,0xF9,0x3D,0xC1};
-  static const u8 orig[6]={0x40,0x06,0x00,0x00,0x84,0x03}, uw[6]={0x90,0x06,0x00,0x00,0xD0,0x02},   /* 1600x900 -> 1680x720 (low halves of two u32s) */
-                  w1610[6]={0xA0,0x05,0x00,0x00,0x84,0x03};                                         /* 1600x900 -> 1440x900 */
-  const char* e=getenv("SWR_ULTRAWIDE"); int on= e? e[0]-'0' : g_opt_ultrawide;
-  if(on!=1 && on!=2) return;
-  const u8* wide= on==2? w1610 : uw;
-  if(!on || strcmp(mi->name,"main") || memcmp(mi->build_id,id,20)) return;
-  u64 off=0x1A1BE18ull; if(off+6>mi->size) return;
-  u8* p=GP(mi->base+off);
-  if(!memcmp(p,wide,6)) return;
-  if(memcmp(p,orig,6)){ WARN("ultrawide: unexpected bytes at main+%llx (%02x %02x %02x %02x %02x %02x): not applied\n",(unsigned long long)off,p[0],p[1],p[2],p[3],p[4],p[5]); return; }
-  memcpy(p,wide,6);
-  if(on==2) LOG("aspect: 16:10 patch applied (1440x900 base; at theboy181's 21:9 mod location)\n");
-  else LOG("ultrawide: 21:9 patch applied (1680x720 base; theboy181's 21:9 mod)\n"); }
-
 static int load_one(const SwrModInfo* mi){
   char p[1200]; u64 fsz=0; u8* f=NULL;
   const char* dirs[]={"exefs/",""};
@@ -68,7 +45,6 @@ static int load_one(const SwrModInfo* mi){
     memcpy(dst,f,n);
   } else { WARN("%s: unknown format\n",p); free(f); return -1; }
   free(f);
-  dread_ultrawide(mi);
   /* .text RX, .rodata R, .data/.bss RW */
   u64 t0=mi->base+mi->text_off, r0=mi->base+mi->ro_off, d0=mi->base+mi->data_off;
   mem_set_state(t0,((mi->text_size+0xFFF)&~0xFFFu),MS_CODE,PERM_RX);

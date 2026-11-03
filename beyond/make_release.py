@@ -69,8 +69,8 @@ are under the ZPL / public domain / MIT-style terms listed in their headers. Sou
 https://www.mingw-w64.org, https://github.com/brechtsanders/winlibs_mingw (the exact version is in recompiler\\gcc\\version_info.txt).
 """ % GV
 
-README = """METROID DREAD - recompiled for PC
-=================================
+README = """METROID PRIME 4 RECOMP - Metroid Prime 4 Beyond recompiled for PC
+=================================================================
 
 This is not the game. It turns YOUR OWN copy of Metroid Prime 4 Beyond (version 2.1.0) into a native Windows game:
 setup compiles it on your PC. No Nintendo files, keys or firmware are included.
@@ -87,9 +87,8 @@ setup compiles it on your PC. No Nintendo files, keys or firmware are included.
 Controllers: Xbox controllers work as they are; SDL2.dll (included) adds Switch Pro, Joy-Con, DualShock 4, DualSense
 and 8BitDo over USB or Bluetooth. Keyboard: arrows = D-pad, WASD = stick, X/Z/C/V = A/B/X/Y, Enter = +, Backspace = -.
 
-Made by yozander2009-stack (project lead) with Claude by Anthropic (AI pair programmer).
-Credits: SwitchRecomp by MZ Labs (recompiler and runtime); ScarletNX (native Vulkan renderer); theboy181 (60 FPS cutscenes,
-21:9); Krydar, Nova77, xSeRosiSx (button-icon mods, downloaded on request; art: Xelu's FREE Controller Prompts); program icon: Metroid icon created by Smashicons - Flaticon (https://www.flaticon.com/free-icons/metroid); Dear ImGui; SDL2; zlib; libvpx; OpenH264; GCC / MinGW-w64; Python. Licences are in the licenses folder; the EXE is
+Built on the recompiled runtime by yozander2009-stack, with Claude by Anthropic (AI pair programmer).
+Credits: SwitchRecomp by MZ Labs (recompiler and runtime); ScarletNX (native Vulkan renderer); Krydar, Nova77, xSeRosiSx (button-icon mods, downloaded on request; art: Xelu's FREE Controller Prompts); program icon: Metroid icon created by Smashicons - Flaticon (https://www.flaticon.com/free-icons/metroid); Dear ImGui; SDL2; zlib; libvpx; OpenH264; GCC / MinGW-w64; Python. Licences are in the licenses folder; the EXE is
 GPL-3.0 (it contains the ScarletNX renderer) and its source is published with this release.
 Metroid Prime 4 Beyond is (c) Nintendo. This project is not affiliated with or endorsed by Nintendo.
 """
@@ -161,13 +160,10 @@ def release(out, exe, version):
         cp(os.path.join(ROOT, s), os.path.join(lic, d))
     open(os.path.join(lic, 'zlib-and-SDL2.txt'), 'w').write(ZLIB_TXT)
     open(os.path.join(lic, 'GCC-binutils-MinGW.txt'), 'w').write(GCC_TXT)
-    open(os.path.join(lic, 'theboy181-patches.txt'), 'w').write(
-        'The 60 FPS cutscene and 21:9 patches are ports of theboy181\'s Metroid Prime 4 Beyond v2.1.0 patches\n'
-        '(https://github.com/theboy181/switch-ptchtxt-mods); 21:9 commissioned by Nikorasu081.\n')
     open(os.path.join(dst, 'README.txt'), 'w', newline='\r\n').write(README)
     update_files(out, version)
     # one zip to download
-    z = os.path.join(out, 'MetroidBeyond-PC-v%s.zip' % version)
+    z = os.path.join(out, 'MetroidPrime4Recomp-PC-v%s.zip' % version)
     with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for dp, dn, fn in os.walk(dst):
             for n in fn:
@@ -266,18 +262,17 @@ def source(out):
             cp(p, os.path.join(out, 'linux', f))
     for f in ('run.sh', 'README-SteamDeck.txt', 'Metroid Prime 4 Beyond.ini'):   # the Steam Deck package's own files (linux/package.sh)
         cp(os.path.join(ROOT, 'linux', 'dist', f), os.path.join(out, 'linux', 'dist', f))
-    for f in ('AppRun', 'metroid-beyond.desktop'):   # the AppImage's own files (linux/make_appimage.sh)
+    for f in ('AppRun', 'metroid-prime-4-recomp.desktop'):   # the AppImage's own files (linux/make_appimage.sh)
         cp(os.path.join(ROOT, 'linux', 'appimage', f), os.path.join(out, 'linux', 'appimage', f))
     cp(os.path.join(ROOT, 'runtime', 'snxvk', 'LICENSE'), os.path.join(out, 'LICENSE-GPL-3.0.txt'))
     open(os.path.join(out, '.gitignore'), 'w').write('\n'.join(['gcc/', 'python/', 'bin/', 'games/', '*_build/', '*_data/', '*_code.dll', '*.o', '*.a',
         '!runtime/vp9/win/libvpx.a', '!runtime/oh264/win/*.a', 'runtime/imgui/', 'redist/', 'cleanbuild_test/', 'runtime/snxvk/obj*/', '__pycache__/', 'release/', '*.log', 'shader_cache/', 'vulkan_native/', '',
-        '# Linux build output (linux/*.sh)', '*.so', 'linux/test/', 'linux/dist/MetroidBeyond-Linux/', 'linux/dist/*.tar.gz', 'linux/dist/*.AppImage', 'linux/appimage/cache/', 'linux/appimage/AppDir/', '',
+        '# Linux build output (linux/*.sh)', '*.so', 'linux/test/', 'linux/dist/MetroidPrime4Recomp-Linux/', 'linux/dist/*.tar.gz', 'linux/dist/*.AppImage', 'linux/appimage/cache/', 'linux/appimage/AppDir/', '',
         '# never commit binaries, archives or game files', '*.exe', '*.dll', '*.pdb', '*.zip', '*.7z', '*.rar', '*.nsp', '*.xci',
         '*.nca', '*.nso', '*.keys', 'exefs/', 'romfs/', 'ExeFS/', 'RomFS/', 'mods/', '']))
     # line endings exactly as written (some runtime files are CRLF by rule, the Linux scripts must stay LF)
     open(os.path.join(out, '.gitattributes'), 'w', newline='\n').write('* -text\n')
     open(os.path.join(out, 'README.md'), 'w', encoding='utf-8').write(SOURCE_README)
-    cp(os.path.join(ROOT, 'beyond', 'DLSS.md'), os.path.join(out, 'DLSS.md'))
     # files that only belong in the repository (CONTRIBUTING.md, build.bat, .github issue forms)
     repo = os.path.join(ROOT, 'beyond', 'repo')
     for dp, dn, fn in os.walk(repo):
@@ -363,7 +358,7 @@ The release zip bundles the same GCC and Python so that setup can compile the ga
 python\\python.exe work-profiler\\build_imgui.py
 set GLSLANG=<path to glslang.exe 16.6.0> && set SWR_NO_DLSS=1 && python\\python.exe work-profiler\\build_snxvk2.py
 set SWR_RELEASE=1 && python\\python.exe switchrecomp.py --build-runtime --cc gcc
-python\\python.exe dread\\make_release.py release <empty folder> --version X.Y.Z --exe bin\\runtime_win64_win32.exe
+python\\python.exe beyond\\make_release.py release <empty folder> --version X.Y.Z --exe bin\\runtime_win64_win32.exe
 ```
 
 The release step also needs `redist\\zlib1.dll` (zlib 1.3.1, x64) and `redist\\SDL2.dll` (SDL 2.x x64 release), the two
@@ -391,12 +386,12 @@ the mouse free aim and F7 recording.
 
 ### AppImage
 
-`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Prime_4_Beyond-x86_64.AppImage`: one file for players, like the Windows
+`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Prime_4_Recomp-x86_64.AppImage`: one file for players, like the Windows
 EXE. It has the runtime with the Play / setup screens, the recompiler, a relocatable GCC 14.3
 ([Bootlin](https://toolchains.bootlin.com)) and Python 3.12
 ([python-build-standalone](https://github.com/astral-sh/python-build-standalone)), so nothing needs to be installed;
 no game files are inside. The downloads are checked against their SHA-256 and kept in `linux/appimage/cache/`. The game
-is installed in `~/.local/share/MetroidBeyondRecomp` (or `METROID_BEYOND_HOME`). It needs glibc 2.38 or newer, SDL2 for
+is installed in `~/.local/share/MetroidPrime4Recomp` (or `MP4_RECOMP_HOME`). It needs glibc 2.38 or newer, SDL2 for
 controllers and an OpenGL 4.3 driver.
 
 ## What is in this repository
@@ -407,12 +402,12 @@ controllers and an OpenGL 4.3 driver.
 - `.gitignore` keeps out toolchains, build output, EXEs, DLLs, archives and anything from a game folder.
 - `beyond/beyond_patches.json` holds **our** edits only: for each patched file, the SHA-256 of the C that setup
   generates from the player's ExeFS, the line range to replace, and the replacement lines we wrote (frame pacing,
-  vector growth, zlib, cutscene skip). It contains no game code, no data from the game and no decryption.
+  vector growth, zlib). It contains no game code, no data from the game and no decryption.
 - `beyond/romfs_beyond.manifest` lists RomFS file names, sizes and SHA-1 hashes, used only to check the player's files.
 
 ## Contributors
 
-- **yozander2009-stack** — project lead
+- **yozander2009-stack** — the recompiled runtime and launcher this port is built from
 - **Claude** (Anthropic) — AI pair programmer: runtime fixes and performance work, the front end and in-game menu,
   setup, the Linux build, testing and documentation
 
@@ -442,8 +437,7 @@ Each source file keeps its own licence; Apache-2.0 and MIT code is GPL-3.0-compa
 - libvpx and OpenH264: BSD.
 - SDL2 and zlib: zlib licence.
 
-NVIDIA DLAA: the code is here (`dlss.c`), NVIDIA's files are not, and the release is built without it. To add it to
-your own build, see [DLSS.md](DLSS.md). A build with DLSS is for your own use only: never share it.
+NVIDIA DLAA: the code is here (`dlss.c`), NVIDIA's files are not, and the release is built without it. A build with DLSS is for your own use only: never share it.
 
 Metroid Prime 4 Beyond is © Nintendo. This project is not affiliated with or endorsed by Nintendo.
 """

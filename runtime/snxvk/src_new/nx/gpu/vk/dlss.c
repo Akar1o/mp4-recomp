@@ -209,8 +209,8 @@ int vk_dlss_init(void) {
     return g_ngx.available;
 }
 
-/* ---------------------------------------------------------------- where DLSS runs in Dread's frame
-   Measured (SNX_FRAME_MAP, 2026-10-18, a combat room and the save room): the lit scene goes from the lighting buffer
+/* ---------------------------------------------------------------- where DLSS runs in the frame
+   Measured before the Metroid Prime 4 port (SNX_FRAME_MAP, 2026-10-18, a combat room and a save room; not re-measured): the lit scene goes from the lighting buffer
    through a composite pass into a full-size R11G11B10F "scene" target (transparents, when a room has them, are drawn
    into it too); the post effects read that target into another full-size R11G11B10F one; bloom then starts at 1/5
    size and the HUD is drawn at 1280x720 and composited last. The rule that holds in both rooms: the scene is the last

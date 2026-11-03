@@ -33,8 +33,8 @@ typedef struct {
   float filter[AC][2][4];
 } AVoice;
 typedef struct {u8 valid,used;u32 count,dest;float volume,matrix[24][24];} AMix;
-/* I3DL2 reverb (effect type 5). Dread runs one in place on buffers 6-11 of its 24-buffer submix with a dry gain of
-   0.25: without it that whole send bus played dry at 4x (+12 dB, ADAM's voice among it) and with no room sound.
+/* I3DL2 reverb (effect type 5). A game can run one in place on buffers of its submix with a low dry gain: without it that
+   whole send bus plays dry and loud (4x, +12 dB, at a dry gain of 0.25) and with no room sound.
    Own implementation of the I3DL2 model: room/HF input gain, a pre-delay with early-reflection taps, two diffusion
    all-passes and a 4-line feedback delay network with HF damping for the late reverb */
 #define RV_PRE 32768

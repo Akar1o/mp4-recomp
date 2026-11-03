@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Metroid Prime 4 Beyond
+Name=Metroid Prime 4 Recomp
 Comment=Metroid Prime 4 Beyond recompiled for PC: sets up and plays your own copy of the game
-Exec=metroid-beyond
-Icon=metroid-beyond
+Exec=metroid-prime-4-recomp
+Icon=metroid-prime-4-recomp
 Categories=Game;
 Terminal=false
-StartupWMClass=MetroidBeyond
+StartupWMClass=MetroidPrime4Recomp

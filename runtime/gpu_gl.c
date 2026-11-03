@@ -1844,124 +1844,8 @@ void gpu_gl_fps_overlay(void){
     glClear(GL_COLOR_BUFFER_BIT); }
   glDisable(GL_SCISSOR_TEST); state_dirty(); }
 
-/* "Hold (-) to skip" in Metroid Dread's own font, top left, while main.c says a skippable cutscene plays.
-   The font is read from the game's romfs at first use: textures/system/fonts/textures/occ_atlas.bctex (MTXT: gzip of an
-   NVN XTX texture, BC3 2048x1024, block linear, block height 16 GOBs; uploaded as BC3 after deswizzling) and
-   system/fonts/occ_32.bfont (MFNT: 14-byte glyph records x, y, w, h, x offset, y offset, advance; glyph = ASCII - 31).
-   The round - button is in the same atlas at 725,144 32x32 (no glyph table entry). zlib is loaded at run time. */
-typedef struct { const u8* next_in; unsigned avail_in; unsigned long total_in; u8* next_out; unsigned avail_out; unsigned long total_out;
-  const char* msg; void* state; void* zalloc; void* zfree; void* opaque; int data_type; unsigned long adler; unsigned long reserved; } SkZ;
-static GLuint g_sk_tex, g_sk_prog; static int g_sk_state; static short g_sk_gl[96][7]; static GLint g_sk_u_rect, g_sk_u_uv, g_sk_u_col, g_sk_u_scr;
-static u8* sk_read(const char* rel, size_t* n){
-  extern char g_romfs_dir_override[1024]; char p[1400];
-  if(g_romfs_dir_override[0]) snprintf(p,sizeof p,"%s/%s",g_romfs_dir_override,rel); else snprintf(p,sizeof p,"%sromfs/%s",g_datadir,rel);
-  FILE* f=fopen(p,"rb"); if(!f) return NULL; fseek(f,0,SEEK_END); long l=ftell(f); fseek(f,0,SEEK_SET);
-  u8* d= l>0? malloc((size_t)l) : NULL; if(d && fread(d,1,(size_t)l,f)!=(size_t)l){ free(d); d=NULL; } fclose(f); *n=(size_t)l; return d; }
-/* the font on the CPU, once: the atlas as linear BC3 blocks (2048x1024) and the ASCII glyph records. Shared by the
-   OpenGL prompt (uploaded as BC3) and the native Vulkan one (skip_prompt_rgba, composed here and blended by snxvk hdr.c) */
-static u8* g_sk_lin; static int g_sk_cpu;
-static int sk_font_cpu(void){
-  if(g_sk_cpu) return g_sk_cpu>0;
-  g_sk_cpu=-1;
-  size_t fn=0, an=0; u8* fnt=sk_read("system/fonts/occ_32.bfont",&fn); u8* mt=sk_read("textures/system/fonts/textures/occ_atlas.bctex",&an);
-  u8 *xtx=NULL, *lin=NULL;
-  if(!fnt || !mt || fn<0x60+96*14 || memcmp(fnt,"MFNT",4) || an<16 || memcmp(mt,"MTXT",4)) goto out;
-  memcpy(g_sk_gl,fnt+0x60,sizeof g_sk_gl);
-  { void* z=plat_dl_open(
-#ifdef _WIN32
-      "zlib1.dll"
-#else
-      "libz.so.1"
-#endif
-      ); if(!z) goto out;
-    int (*init)(SkZ*,int,const char*,int)=(int(*)(SkZ*,int,const char*,int))plat_dl_sym(z,"inflateInit2_");
-    int (*inf)(SkZ*,int)=(int(*)(SkZ*,int))plat_dl_sym(z,"inflate"); int (*end)(SkZ*)=(int(*)(SkZ*))plat_dl_sym(z,"inflateEnd");
-    if(!init || !inf || !end) goto out;
-    size_t cap=4u<<20; xtx=malloc(cap); SkZ s; memset(&s,0,sizeof s); s.next_in=mt+8; s.avail_in=(unsigned)(an-8); s.next_out=xtx; s.avail_out=(unsigned)cap;
-    if(!xtx || init(&s,31,"1.2.11",(int)sizeof s)!=0) goto out;
-    int r=inf(&s,4); size_t got=s.total_out; end(&s); if(r!=1) goto out;   /* Z_FINISH -> Z_STREAM_END */
-    /* the image block: NvBH type 3, data at its offset */
-    for(size_t i=0;i+28<=got;i++) if(!memcmp(xtx+i,"HBvN",4)){ u64 ds,doff; u32 ty; memcpy(&ds,xtx+i+8,8); memcpy(&doff,xtx+i+16,8); memcpy(&ty,xtx+i+24,4);
-        if(ty==3 && ds==2048u*1024u && i+doff+ds<=got){ lin=malloc(ds); if(!lin) goto out; deswizzle(lin,8192,xtx+i+doff,8192,256,4); break; } }
-    if(!lin) goto out; }
-  g_sk_lin=lin; lin=NULL; g_sk_cpu=1; LOG("skip prompt: game font loaded\n");
-out:
-  if(g_sk_cpu<0) LOG("skip prompt: the game's font could not be loaded (romfs or zlib missing)\n");
-  free(fnt); free(mt); free(xtx); free(lin); return g_sk_cpu>0; }
-/* one BC3 texel of the atlas, RGBA8 */
-static void sk_texel(int x, int y, u8* o){
-  const u8* b=g_sk_lin+((size_t)(y>>2)*512+(size_t)(x>>2))*16; int i=(y&3)*4+(x&3);
-  int a0=b[0], a1=b[1]; u64 ab=0; for(int k=0;k<6;k++) ab|=(u64)b[2+k]<<(8*k); int ai=(int)((ab>>(3*i))&7); int a;
-  if(a0>a1) a= ai==0? a0 : ai==1? a1 : ((8-ai)*a0+(ai-1)*a1)/7; else a= ai==0? a0 : ai==1? a1 : ai==6? 0 : ai==7? 255 : ((6-ai)*a0+(ai-1)*a1)/5;
-  u16 c0=(u16)(b[8]|b[9]<<8), c1=(u16)(b[10]|b[11]<<8); u32 cb=(u32)b[12]|(u32)b[13]<<8|(u32)b[14]<<16|(u32)b[15]<<24; int ci=(int)((cb>>(2*i))&3);
-  int r0=(c0>>11)*255/31, g0=((c0>>5)&63)*255/63, b0=(c0&31)*255/31, r1=(c1>>11)*255/31, g1=((c1>>5)&63)*255/63, b1=(c1&31)*255/31;
-  int w0= ci==0? 3 : ci==1? 0 : ci==2? 2 : 1;   /* BC3 colour is always the 4-colour mode */
-  o[0]=(u8)((r0*w0+r1*(3-w0))/3); o[1]=(u8)((g0*w0+g1*(3-w0))/3); o[2]=(u8)((b0*w0+b1*(3-w0))/3); o[3]=(u8)a; }
-/* "Hold (-) to skip" at 1080p size as premultiplied RGBA (shadow included); *tw = the text's width (the hold bar's) */
-static void sk_blit(float* img, int W, int H, int sx, int sy, int w, int h, int dx, int dy, float tint, float alpha){
-  for(int y=0;y<h;y++) for(int x=0;x<w;x++){ int X=dx+x, Y=dy+y; if(X<0||Y<0||X>=W||Y>=H) continue;
-    u8 t[4]; sk_texel(sx+x,sy+y,t); float a=t[3]/255.0f*alpha; float* d=img+((size_t)Y*W+X)*4;
-    for(int k=0;k<3;k++) d[k]=t[k]/255.0f*tint*a+d[k]*(1-a); d[3]=a+d[3]*(1-a); } }
-static int sk_text_cpu(float* img, int W, int H, const char* s, int x, int y){
-  for(;*s;s++){ int c=(unsigned char)*s; if(c<32 || c>126) continue; const short* g=g_sk_gl[c-31];
-    if(img && g[2]>0 && g[3]>0){ int gx=x+g[4], gy=y+30-g[5]; sk_blit(img,W,H,g[0],g[1],g[2],g[3],gx+2,gy+2,0,0.6f); sk_blit(img,W,H,g[0],g[1],g[2],g[3],gx,gy,1,1); }
-    x+=g[6]; }
-  return x; }
-int skip_prompt_rgba(u8** px, int* w, int* h, int* tw){
-  if(!sk_font_cpu()) return 0;
-  enum { W=320, H=48 }; float* img=calloc((size_t)W*H*4,sizeof(float)); u8* out=malloc((size_t)W*H*4); if(!img || !out){ free(img); free(out); return 0; }
-  int x=sk_text_cpu(img,W,H,"Hold",2,4)+8;
-  sk_blit(img,W,H,725,144,32,32,x+2,4+2-1,0,0.6f); sk_blit(img,W,H,725,144,32,32,x,4-1,1,1);
-  x=sk_text_cpu(img,W,H,"to skip",x+32+8,4);
-  for(size_t i=0;i<(size_t)W*H*4;i++){ float v=img[i]*255.0f+0.5f; out[i]=(u8)(v>255? 255 : v<0? 0 : v); }
-  free(img); *px=out; *w=W; *h=H; *tw=x-2; return 1; }
-static int skip_prompt_load(void){
-  int ok=0; u8* lin=NULL;
-  if(!sk_font_cpu()) goto out;
-  lin=g_sk_lin;
-  glGenTextures(1,&g_sk_tex); glBindTexture(GL_TEXTURE_2D,g_sk_tex);
-  glTexStorage2D(GL_TEXTURE_2D,1,0x83F3,2048,1024); glCompressedTexSubImage2D(GL_TEXTURE_2D,0,0,0,2048,1024,0x83F3,2048*1024,lin);   /* COMPRESSED_RGBA_S3TC_DXT5 */
-  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-  { static const char* vs="#version 430 core\nuniform vec4 rect; uniform vec4 uvr; uniform vec4 scr; out vec2 uv;\n"
-      "void main(){ vec2 c=vec2(gl_VertexID&1,gl_VertexID>>1); uv=uvr.xy+c*uvr.zw; vec2 p=(rect.xy+c*rect.zw)/scr.xy; gl_Position=vec4(p.x*2.0-1.0,1.0-p.y*2.0,0.0,1.0); }";
-    static const char* fs="#version 430 core\nin vec2 uv; uniform sampler2D t; uniform vec4 col; out vec4 o;\n"
-      "void main(){ vec4 c= uv.x<0.0? vec4(1.0) : texture(t,uv); o=vec4(c.rgb*col.rgb,c.a*col.a); }";
-    GLuint a=compile(GL_VERTEX_SHADER,vs,NULL,0), b=compile(GL_FRAGMENT_SHADER,fs,NULL,0); g_sk_prog= a&&b? link2(a,b,0) : 0; }
-  if(!g_sk_prog) goto out;
-  g_sk_u_rect=glGetUniformLocation(g_sk_prog,"rect"); g_sk_u_uv=glGetUniformLocation(g_sk_prog,"uvr");
-  g_sk_u_col=glGetUniformLocation(g_sk_prog,"col"); g_sk_u_scr=glGetUniformLocation(g_sk_prog,"scr");
-  ok=1;
-out:
-  (void)lin; return ok; }
-static void sk_quad(float x, float y, float w, float h, float u, float v, float uw, float vh, float r, float g, float b, float a){
-  float q[3][4]={{x,y,w,h},{u,v,uw,vh},{r,g,b,a}}; glUniform4fv(g_sk_u_rect,1,q[0]); glUniform4fv(g_sk_u_uv,1,q[1]); glUniform4fv(g_sk_u_col,1,q[2]); glDrawArrays(GL_TRIANGLE_STRIP,0,4); }
-static float sk_text(const char* s, float x, float y, float k, float a, int draw){   /* y = baseline top of a 34 px line */
-  for(;*s;s++){ int c=(unsigned char)*s; if(c<32 || c>126) continue; const short* g=g_sk_gl[c-31];
-    if(draw && g[2]>0 && g[3]>0){ float gx=x+g[4]*k, gy=y+(30-g[5])*k;
-      sk_quad(gx+2*k,gy+2*k,g[2]*k,g[3]*k,g[0]/2048.f,g[1]/1024.f,g[2]/2048.f,g[3]/1024.f,0,0,0,a*0.6f);
-      sk_quad(gx,gy,g[2]*k,g[3]*k,g[0]/2048.f,g[1]/1024.f,g[2]/2048.f,g[3]/1024.f,1,1,1,a); }
-    x+=g[6]*k; }
-  return x; }
-void gpu_gl_skip_prompt(void){
-  extern volatile int g_skip_prompt; extern volatile float g_skip_hold; extern int g_opt_show_fps;
-  static float alpha; static u64 last; u64 now=plat_ns(); float dt= last? (float)(now-last)/1e9f : 0; last=now; if(dt>0.1f) dt=0.1f;
-  float want= g_skip_prompt? 1.0f : 0.0f; alpha+= (want-alpha)*(dt*8.0f>1? 1 : dt*8.0f); if(alpha<0.01f && !want){ alpha=0; return; }
-  if(g_sk_state==0) g_sk_state= skip_prompt_load()? 1 : -1;
-  if(g_sk_state<0 || g_gles) return;
-  int w=1,h=1; backend_window_size(&w,&h); float k=(float)h/1080.0f; if(k<0.5f) k=0.5f;
-  float x=48*k, y=(g_opt_show_fps? 96 : 44)*k, ts=0.95f*k;
-  glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,w,h); glDisable(GL_SCISSOR_TEST); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
-  glDisable(GL_STENCIL_TEST); glDisable(GL_FRAMEBUFFER_SRGB); glColorMaski(0,1,1,1,1);
-  glEnable(GL_BLEND); glBlendFuncSeparatei(0,GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA,GL_ONE,GL_ONE_MINUS_SRC_ALPHA); glBlendEquationSeparatei(0,GL_FUNC_ADD,GL_FUNC_ADD);
-  glUseProgram(g_sk_prog); { float sc[4]={(float)w,(float)h,0,0}; glUniform4fv(g_sk_u_scr,1,sc); } glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,g_sk_tex); glBindSampler(0,0);
-  glUniform1i(glGetUniformLocation(g_sk_prog,"t"),0); glBindVertexArray(g_scratch_vao);
-  float ix=x, cx=sk_text("Hold",x,y,ts,alpha,1)+8*k, isz=34*k;
-  sk_quad(cx+2*k,y+2*k-1*k,isz,isz,725/2048.f,144/1024.f,32/2048.f,32/1024.f,0,0,0,alpha*0.6f);
-  sk_quad(cx,y-1*k,isz,isz,725/2048.f,144/1024.f,32/2048.f,32/1024.f,1,1,1,alpha);
-  float end=sk_text("to skip",cx+isz+8*k,y,ts,alpha,1);
-  { float hold=g_skip_hold; if(hold>0){ float bw=(end-ix)*hold;   /* hold progress under the text */
-      sk_quad(ix,y+42*k,end-ix,4*k,-1,0,0,0,0,0,0,alpha*0.5f); sk_quad(ix,y+42*k,bw,4*k,-1,0,0,0,1,1,1,alpha); } }
-  glDisable(GL_BLEND); glUseProgram(0); state_dirty(); }
+/* the native Vulkan renderer's prompt overlay (snxvk hdr.c) asks for a picture here: there is none for this game */
+int skip_prompt_rgba(u8** px, int* w, int* h, int* tw){ (void)px; (void)w; (void)h; (void)tw; return 0; }
 
 static void apply_state(GpuChannel* ch){
   u32* r=ch->r3d;
@@ -2403,8 +2287,8 @@ static GLuint null_tex(GLenum tg){
 
 static int getenv_cached_rminchk(void){ static int v=-1; if(v<0) v=getenv("SWR_NO_RMIN_RECHECK")!=NULL; return v; }
 static int getenv_cached_rtswz(void){ static int v=-1; if(v<0) v=getenv("SWR_OLD_RT_SWIZZLE")!=NULL; return v; }   /* 1 = old behaviour, ignore reorders on RTs */
-/* DLAA on the OpenGL renderer ([Graphics] dlss=1, dlss_gl.c runs NGX through Vulkan). Where it runs in Dread's frame
-   (measured with the native Vulkan renderer, see snxvk dlss.c): the scene is the last full-size R11G11B10F target read by
+/* DLAA on the OpenGL renderer ([Graphics] dlss=1, dlss_gl.c runs NGX through Vulkan). Where it runs in the frame
+   (see snxvk dlss.c; measured before the Metroid Prime 4 port, not re-measured for it): the scene is the last full-size R11G11B10F target read by
    a full-size R11G11B10F pass before the first small (<= 1/4 width) pass, i.e. the post-effects input. DLSS runs on it at
    its first read after it was drawn this frame, so post effects, bloom and the HUD get the anti-aliased image. A new
    target has to win 30 frames in a row before DLSS moves to it; 30 frames without one (menus, videos) drop it */
@@ -2604,7 +2488,7 @@ static int downsample_read(const Tex* t, const ShTex* st){
   if(off || g_scale<1.99f || !t || !t->is_rt || t->target!=GL_TEXTURE_2D || t->f.depth || t->f.is_int || st->fetch_only || st->type!=1 || st->array || st->shadow) return 0;
   const Tex* o=g_rt[0]; if(!o || o==t) return 0;
   if(t->w>=2*o->w && t->h>=2*o->h) return 1;   /* shrinking it (the scene into the glow chain) */
-  /* a small buffer (the glow chain: 320x180 in Dread) blurred in place or spread over the screen: its taps are a
+  /* a small buffer (a glow chain, e.g. 320x180) blurred in place or spread over the screen: its taps are a
      guest texel apart, which at 4x skipped 3 texels in 4 and left a grid every 20 pixels (MEASURED: light4-fix
      profile). Glow is soft by nature, so the averaged copy loses nothing */
   return t->w<=480 && t->h<=270; }
@@ -3032,20 +2916,6 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
           char fp[128]; snprintf(fp,sizeof fp,"captures/cbdump/d%d_rt_%ux%u_bpp%u.bin",nd,(u32)SC(t->w),(u32)SC(t->h),t->f.bpp); FILE* f=fopen(fp,"wb"); if(f){ fwrite(px,1,n,f); fclose(f); } free(px); state_dirty(); } }
       LOG("debug: constant buffers of %016llx dumped (%d)\n",(unsigned long long)dh,nd); } }
   lighting_payload(fs);
-  /* Targeted diagnostic for Metroid Dread's deferred lighting shader only.
-     Invalidate both state caches after an override so the next draw restores
-     the guest state. Normal launches do not override any lighting tests. */
-  if(fs->hash==0x9da586a770c2665aull){
-    static int mask_test=-1; if(mask_test<0){ const char* e=getenv("SWR_LIGHTING_MASK_TEST"); mask_test=e? atoi(e):0; }
-    if(mask_test==1 || mask_test==2){
-      static int said; if(!said){ said=1; LOG("lighting diagnostic: shader %016llx, bypass %s; stencil front func/ref/mask=%x/%x/%x ops=%x/%x/%x write=%x, back enable=%x func/ref/mask=%x/%x/%x, depth enable/func=%x/%x\n",
-        (unsigned long long)fs->hash, mask_test==1? "stencil":"depth",
-        r[0x4E4],r[0x4E5],r[0x4E6],r[0x4E1],r[0x4E2],r[0x4E3],r[0x4E7],
-        r[0x565],r[0x569],r[0x3D5],r[0x3D7],r[0x4B3],r[0x4C3]); }
-      if(mask_test==1) glDisable(GL_STENCIL_TEST); else glDisable(GL_DEPTH_TEST);
-      state_dirty();
-    }
-  }
 
   { float vt[2]; memcpy(vt,&r[0x280],8); float fl[4]={ vt[1]<0? -1.f : 1.f, p_clip? 0.f : (float)(r[0x35F]&1), 0, 0 };
     if(gs){ if(gs->uloc!=-1 && (!gs->lu_ok || memcmp(gs->lu,fl,16))){ memcpy(gs->lu,fl,16); gs->lu_ok=1; prog_u4(gs->sp,gs->uloc,0,fl); }
@@ -3818,8 +3688,8 @@ static void warm_step(void){
     j->p=glCreateProgram(); glAttachShader(j->p,j->a); glAttachShader(j->p,j->b); p_glProgramParameteri(j->p,GL_PROGRAM_BINARY_RETRIEVABLE_HINT,GL_TRUE); glLinkProgram(j->p);
     free(e->vs); free(e->fs); e->vs=e->fs=NULL; } }
 /* ============================================================ shader pre-build (ini prebuild_shaders=1)
-   Metroid Dread keeps every shader as NVN compiled programs in romfs/system/shd/*.bshdat. Before the game draws,
-   every vertex and pixel program found there goes through what a draw does on first use (translate, sh_post, the
+   For a game that ships its shaders as NVN compiled programs in romfs/system/shd/*.bshdat (Metroid Prime 4 has no
+   such folder: its shaders are found in GPU memory, see below). Before the game draws, every vertex and pixel program found there goes through what a draw does on first use (translate, sh_post, the
    separable program's binary under the same key), so a later draw loads a binary instead of compiling. Programs are
    keyed as a draw with all-float vertex attributes, textures and render targets keys them (key2 0): integer variants
    (skinning indices, integer targets) still build at first use. A file once done is listed (name and size) in
@@ -3914,7 +3784,7 @@ static void prebuild_shaders(void){
       filesdone,progs,built,compile_ns/1e9,had,failed,(plat_ns()-t0)/1e9); }
 /* ============================================================ shader pre-build from GPU memory
    ([Graphics] prebuild_shaders=1, the default). Metroid Prime 4 keeps its shaders compressed in MaterialArchive.arc (no
-   NVN programs to find in the files, unlike Dread's romfs/system/shd), but unpacks them into GPU memory at boot: 662
+   NVN programs to find in the files, no romfs/system/shd), but unpacks them into GPU memory at boot: 662
    programs by 20 s into the intro, when draws had used 10. A scanner thread looks through every GPU buffer every few
    seconds and copies each new program; the GL thread translates a few per loop (time budget, so no hitch); the compile
    threads build them and the programs are kept ready (warm stages) and saved as binaries. So shaders are compiled

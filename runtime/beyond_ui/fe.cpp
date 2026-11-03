@@ -120,9 +120,6 @@ static void apply_env(const IniFile& ini) {
 #endif
     if (!getenv("SWR_FE_TEST")) for (auto& d : drop) env(d.c_str(), false);
     env("SWR_SYNC_SHADERS", ini.get("wait_for_shaders", "1") == "1");
-    env("SWR_LOADING_60", ini.get("loading_60fps", "1") == "1");
-    env("SWR_CUTSCENES_60FPS", ini.get("cutscenes_60fps", "0") == "1");
-    env("SWR_SKIP_CUTSCENES", ini.get("skip_cutscenes", "0") == "1");
 }
 
 // ---------------------------------------------------------------- D3D11
@@ -149,7 +146,7 @@ static void d3d_shutdown() {
 void fe_x11_screen(int* w, int* h, int* hz);   // host below
 #endif
 static float native_scale() {
-    bool docked = getb("docked"); std::string asp = get("aspect");
+    bool docked = getb("docked"); std::string asp;
 #ifdef _WIN32
     RECT r; GetWindowRect(GetDesktopWindow(), &r); float sh = (float)(r.bottom - r.top);
 #else
@@ -159,7 +156,7 @@ static float native_scale() {
 }
 
 static void resolution_rows(bool live_tag) {
-    bool docked = getb("docked"); std::string asp = get("aspect");
+    bool docked = getb("docked"); std::string asp;
     float v = (float)atof(get("resolution").c_str()); if (v <= 0) v = 1;
     std::string t = res_text(v, docked, asp.c_str());
     if (row_slider("##res", "Internal resolution", &v, 0.25f, 4.0f, 0.05f, t.c_str(), live_tag ? "LIVE" : nullptr)) set("resolution", fmt("%g", roundf(v * 100) / 100));
@@ -206,8 +203,8 @@ static Rec recommend() {
     return r;
 }
 static void apply_rec(const Rec& r) {
-    set("docked", "1"); set("fullscreen", "1"); set("resolution", fmt("%g", r.res)); set("fps_limit", r.fps); set("renderer", r.renderer); set("aspect", r.asp);
-    set("anisotropy", r.af); set("sharpening", r.sharp); set("sleep_waits", "1"); set("texture_threads", "0"); set("prebuild_shaders", "1"); set("loading_60fps", "1");
+    set("docked", "1"); set("fullscreen", "1"); set("resolution", fmt("%g", r.res)); set("fps_limit", r.fps); set("renderer", r.renderer);
+    set("anisotropy", r.af); set("sharpening", r.sharp); set("sleep_waits", "1"); set("texture_threads", "0"); set("prebuild_shaders", "1");
     set("auto_set", "1");
 }
 static std::string hw_line() {
@@ -357,7 +354,7 @@ static void report_problem() {
     std::string zip, err;
     if (!make_report(info, &zip, &err)) { flash(err); return; }
     if (!g_test) open_in_explorer(reports_dir());
-    std::string url = "https://github.com/" BEYOND_REPO "/issues/new?template=bug_report.yml&version=" + url_enc(ver) +
+    std::string url = "https://github.com/" MP4_REPO "/issues/new?template=bug_report.yml&version=" + url_enc(ver) +
                       "&gpu=" + url_enc(g_hw.gpu) + "&cpu=" + url_enc(cpu) + (g_hw.ram_gb ? "&ram=" + url_enc(fmt("%d GB", g_hw.ram_gb)) : std::string());
     if (g_test) g_report_url = url; else open_in_explorer(url);
     flash("Logs packed: " + zip + ". Drag it into the bug report.");
@@ -384,7 +381,7 @@ static void page_play() {
     float rs = (float)atof(get("resolution").c_str()); if (rs <= 0) rs = 1;
     std::string fl = get("fps_limit"); std::string ft = fl == "0" ? "Unlimited" : (fl == "1" || fl.empty()) ? "60 FPS" : fl + " FPS";
     struct T { const char* id; const char* title; std::string value; Page page; } tiles[3] = {
-        {"##t1", "RENDERER", rr, PG_GRAPHICS}, {"##t2", "RESOLUTION", res_text(rs, getb("docked"), get("aspect").c_str()), PG_GRAPHICS}, {"##t3", "FPS TARGET", ft, PG_GAMEPLAY}};
+        {"##t1", "RENDERER", rr, PG_GRAPHICS}, {"##t2", "RESOLUTION", res_text(rs, getb("docked"), ""), PG_GRAPHICS}, {"##t3", "FPS TARGET", ft, PG_GAMEPLAY}};
     for (int i = 0; i < 3; i++) {
         if (i) ImGui::SameLine(0, S(12));
         ImVec2 q = ImGui::GetCursorScreenPos();
@@ -437,16 +434,11 @@ static void page_play() {
 }
 
 static void page_display() {
-    page_title("DISPLAY", "Console mode, window and picture shape. These apply when the game starts.");
+    page_title("DISPLAY", "Console mode, window and language. These apply when the game starts.");
     section("CONSOLE MODE"); draw_opt("docked");
     section("WINDOW");
     bool fs = getb("fullscreen");
     if (draw_opt("fullscreen")) backend_fe_fullscreen(getb("fullscreen") ? 1 : 0); (void)fs;
-    section("PICTURE SHAPE");
-    if (draw_opt("aspect")) {
-        set("ultrawide", get("aspect") == "21:9" ? "1" : "0");   // the Python launcher writes both; keep them in step
-        if (get("aspect") != "16:9" && !getb("docked")) { set("docked", "1"); flash("Docked mode switched on: the picture shape only applies there"); }
-    }
     section("LANGUAGE"); draw_opt("language");
 }
 
@@ -470,14 +462,9 @@ static void page_graphics() {
 }
 
 static void page_gameplay() {
-    page_title("GAMEPLAY", "Frame rate, cinematics, loading, camera and cheats.");
+    page_title("GAMEPLAY", "Frame rate, fast forward, camera and cheats.");
     section("FRAME RATE"); draw_opt("fps_limit"); draw_opt("forced_vsync"); draw_opt("show_fps");
-    section("SCENES"); draw_opt("loading_60fps"); draw_opt("cutscenes_60fps");
-#ifndef SWR_NO_SKIPCUT
-    draw_opt("skip_cutscenes");
-#endif
-   
-    section("LOADING AND RIDES"); draw_opt("fast_loading"); draw_opt("fast_forward"); if (getb("fast_forward")) draw_opt("fast_forward_speed");
+    section("RIDES"); draw_opt("fast_forward"); if (getb("fast_forward")) draw_opt("fast_forward_speed");
     section("CAMERA"); draw_opt("fov");
     section("CHEATS"); draw_opt("cheats");
 }
@@ -656,9 +643,9 @@ static void page_advanced() {
 }
 
 static void page_about() {
-    page_title("CREDITS", "Metroid Prime 4 Beyond recompiled for PC. Metroid Prime 4 Beyond is \xC2\xA9 Nintendo; this program contains none of its files and needs your own copy.");
+    page_title("CREDITS", "Metroid Prime 4 Recomp: Metroid Prime 4 Beyond recompiled for PC. Metroid Prime 4 Beyond is \xC2\xA9 Nintendo; this program contains none of its files and needs your own copy.");
     struct C { const char* who; const char* what; } cs[] = {
-        {"yozander2009-stack", "Project lead of Metroid Dread Recomp, the PC version this one is built from."},
+        {"yozander2009-stack", "Project lead of the recompiled runtime this port is built from."},
         {"Claude (Anthropic)", "AI pair programmer: runtime fixes and performance work, this front end and in-game menu, setup, the Linux build, testing and documentation."},
         {"SwitchRecomp by MZ Labs", "The static recompiler and runtime this build is made from (Apache-2.0). \"SwitchRecomp by MZ Labs\" credit and NOTICE kept."},
         {"ScarletNX contributors", "Native Vulkan renderer: GPU front end, Maxwell to SPIR-V shader translation (GPL-3.0)."},
@@ -855,7 +842,7 @@ static void fe_prepare() {
     g_old = find_old_installs();
     if (g_test && getenv("SWR_FE_NO_OLD")) g_old.clear();   // tests: a PC with no earlier installation
     g_base = g_ini.get("setup_base", ""); g_update = g_ini.get("setup_update", "");
-    // Metroid Dread has no Portuguese (9, pt-BR 17): the game is given English then (svc_core.c game_lang), and the menu shows that
+    // Portuguese (9, pt-BR 17) is not offered: the game is given English then (svc_core.c game_lang), and the menu shows that
     { std::string l = g_ini.get("language", ""); if (l == "9" || l == "17") { set("language", "1"); g_ini.save(); g_ini_dirty = false; } }
     bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
     g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());
@@ -1049,7 +1036,7 @@ static bool x_open() {
     x_win = XCreateWindow(x_dpy, RootWindow(x_dpy, vi->screen), (sw - x_w) / 2, (sh - x_h) / 2, x_w, x_h, 0, vi->depth, InputOutput, vi->visual, CWColormap | CWEventMask | CWBackPixel, &swa);
     XFree(vi);
     XStoreName(x_dpy, x_win, "Metroid Prime 4 Beyond");
-    { XClassHint ch = {(char*)"metroid-beyond", (char*)"MetroidBeyond"}; XSetClassHint(x_dpy, x_win, &ch); }
+    { XClassHint ch = {(char*)"metroid-prime-4-recomp", (char*)"MetroidPrime4Recomp"}; XSetClassHint(x_dpy, x_win, &ch); }
     x_wm_delete = XInternAtom(x_dpy, "WM_DELETE_WINDOW", False); XSetWMProtocols(x_dpy, x_win, &x_wm_delete, 1);
     x_state = XInternAtom(x_dpy, "_NET_WM_STATE", False); x_fs = XInternAtom(x_dpy, "_NET_WM_STATE_FULLSCREEN", False);
     XkbSetDetectableAutoRepeat(x_dpy, True, nullptr);

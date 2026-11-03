@@ -2,14 +2,14 @@
 # Linux build: the AppImage, one file that sets up, configures and runs the game like the Windows EXE. Inside: the runtime
 # with the Play / setup screens, the recompiler (the Python scripts, patches and RomFS manifest), a relocatable GCC
 # (Bootlin) and Python (python-build-standalone), so the player needs neither. No game files inside.
-# The game is installed in ~/.local/share/MetroidBeyondRecomp (METROID_BEYOND_HOME moves it), see appimage/AppRun.
+# The game is installed in ~/.local/share/MetroidPrime4Recomp (MP4_RECOMP_HOME moves it), see appimage/AppRun.
 # Downloads are checked against the SHA-256 below and kept in linux/appimage/cache.
-# Output: linux/dist/Metroid_Prime_4_Beyond-x86_64.AppImage
+# Output: linux/dist/Metroid_Prime_4_Recomp-x86_64.AppImage
 set -e -o pipefail
 source "$(dirname "$(readlink -f "$0")")/env.sh"
 need curl "curl"; need "$PY" "python3"
-C="$W/linux/appimage/cache"; A="$W/linux/appimage/AppDir"; R="$A/usr/share/metroid-beyond/recompiler"
-OUT="$W/linux/dist/Metroid_Prime_4_Beyond-x86_64.AppImage"
+C="$W/linux/appimage/cache"; A="$W/linux/appimage/AppDir"; R="$A/usr/share/metroid-prime-4-recomp/recompiler"
+OUT="$W/linux/dist/Metroid_Prime_4_Recomp-x86_64.AppImage"
 GCC_URL=https://toolchains.bootlin.com/downloads/releases/toolchains/x86-64/tarballs/x86-64--glibc--stable-2025.08-1.tar.xz   # GCC 14.3.0, glibc 2.41
 GCC_SHA=760acd5c3159448b618e237b61935335baada74fe0cdc0d7611826cb49b41c8c
 PY_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
@@ -32,15 +32,15 @@ chmod +x "$C/appimagetool"
 SWR_RELEASE=1 bash "$W/linux/setup_and_build_runtime.sh" > /dev/null
 grep -qa "FIRST-TIME SETUP" "$RUNTIME" || { echo "error: the runtime was built without the front end (SWR_NO_LINUX_FRONTEND?)" >&2; exit 1; }
 
-rm -rf "$A"; mkdir -p "$A/usr/bin" "$R/beyond" "$R/runtime" "$R/linux" "$A/usr/share/metroid-beyond/licenses"
-cp "$RUNTIME" "$A/usr/bin/metroid-beyond"
+rm -rf "$A"; mkdir -p "$A/usr/bin" "$R/beyond" "$R/runtime" "$R/linux" "$A/usr/share/metroid-prime-4-recomp/licenses"
+cp "$RUNTIME" "$A/usr/bin/metroid-prime-4-recomp"
 # the recompiler, laid out as beyond_setup.py expects it (as in the Windows release's recompiler folder)
 cp "$W"/{switchrecomp,codegen,a64,nxloader,metroid_perf}.py "$W/beyond/beyond_setup.py" "$R/"
 cp "$W/beyond/romfs_beyond.manifest" "$W/beyond/fov_hooks.txt" "$R/beyond/"
 [ -f "$W/beyond/beyond_patches.json" ] && cp "$W/beyond/beyond_patches.json" "$R/beyond/"   # game-code patches, once there are any
 cp "$W/runtime/cpu.h" "$W/runtime/cpu_helpers.c" "$R/runtime/"
 cp "$W/linux/lx_compat.h" "$R/linux/"
-LIC="$A/usr/share/metroid-beyond/licenses"
+LIC="$A/usr/share/metroid-prime-4-recomp/licenses"
 cp "$W/LICENSE.txt" "$LIC/LICENSE-SwitchRecomp.txt"; cp "$W/NOTICE.txt" "$W/LICENSE-GPL-3.0.txt" "$LIC/"
 cp "$W/third_party/fsr1/LICENSE.txt" "$LIC/LICENSE-FidelityFX-FSR.txt"
 cp "$W/third_party/imgui-1.92.5/LICENSE.txt" "$LIC/LICENSE-ImGui.txt"; cp "$W/runtime/vp9/LICENSE-libvpx.txt" "$LIC/"
@@ -73,14 +73,14 @@ rm -rf "$T" "$R/__pycache__"
 
 # desktop entry, icon (the 256 px PNG inside runtime/app.ico) and AppRun
 cp "$W/linux/appimage/AppRun" "$A/AppRun"; chmod +x "$A/AppRun"
-cp "$W/linux/appimage/metroid-beyond.desktop" "$A/"
-"$PY" -I - "$W/runtime/app.ico" "$A/metroid-beyond.png" <<'EOF'
+cp "$W/linux/appimage/metroid-prime-4-recomp.desktop" "$A/"
+"$PY" -I - "$W/runtime/app.ico" "$A/metroid-prime-4-recomp.png" <<'EOF'
 import struct, sys
 d = open(sys.argv[1], 'rb').read(); n = struct.unpack_from('<HHH', d)[2]
 best = max((struct.unpack_from('<BBBBHHII', d, 6 + 16 * i) for i in range(n)), key=lambda e: e[0] or 256)
 open(sys.argv[2], 'wb').write(d[best[7]:best[7] + best[6]])
 EOF
-ln -sf metroid-beyond.png "$A/.DirIcon"
+ln -sf metroid-prime-4-recomp.png "$A/.DirIcon"
 
 mkdir -p "$(dirname "$OUT")"
 du -sh "$R/gcc" "$R/python" "$A"

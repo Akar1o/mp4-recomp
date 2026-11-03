@@ -299,10 +299,10 @@ static void win_thread(void* arg){
   HINSTANCE hi=GetModuleHandle(NULL);
   WNDCLASSA wc={0}; wc.style=CS_OWNDC; wc.lpfnWndProc=wndproc; wc.hInstance=hi; wc.hCursor=LoadCursor(NULL,IDC_ARROW);
   wc.hIcon=LoadIcon(hi,MAKEINTRESOURCE(1)); if(!wc.hIcon) wc.hIcon=LoadIcon(NULL,IDI_APPLICATION);
-  wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); wc.lpszClassName="MetroidBeyondWnd";
+  wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); wc.lpszClassName="MetroidPrime4RecompWnd";
   RegisterClassA(&wc);
   RECT r={0,0,1280,720}; AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);
-  g_hwnd=CreateWindowA("MetroidBeyondWnd",g_title,WS_OVERLAPPEDWINDOW|(arg? 0 : WS_VISIBLE),CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL);
+  g_hwnd=CreateWindowA("MetroidPrime4RecompWnd",g_title,WS_OVERLAPPEDWINDOW|(arg? 0 : WS_VISIBLE),CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL);
   if(arg){   /* front end first, in this window; the game continues in it after Play */
     g_fe_mode=1; g_fe_result=fe_run(g_hwnd); g_fe_mode=0;
     if(g_fe_result){ SetEvent(g_fe_done); return; }   /* the process ends */
@@ -314,7 +314,7 @@ static void win_thread(void* arg){
          same place, size and fullscreen state; the front end's goes. g_wp keeps the windowed placement for F11 */
       HWND old=g_hwnd; int fs=g_fullscreen; WINDOWPLACEMENT wp={sizeof wp};
       if(fs) wp=g_wp; else GetWindowPlacement(old,&wp);   /* fullscreen: the windowed placement it was entered from */
-      HWND nw=CreateWindowA("MetroidBeyondWnd",g_title,WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,720,NULL,NULL,hi,NULL);
+      HWND nw=CreateWindowA("MetroidPrime4RecompWnd",g_title,WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,720,NULL,NULL,hi,NULL);
       if(nw){ g_fe_hwnd=old; g_hwnd=nw;
         if(fs){ wp.showCmd=SW_HIDE; SetWindowPlacement(nw,&wp); g_fullscreen=0; ShowCursor(TRUE); set_fullscreen(1); }   /* as F11 does: borderless over the monitor, g_wp saved */
         else SetWindowPlacement(nw,&wp);   /* normal or maximized, as the player left it */
@@ -327,8 +327,8 @@ static void win_thread(void* arg){
     if(!g_want_fs && g_fullscreen) set_fullscreen(0); }
   /* a window with a GL pixel format can't take a Vulkan swapchain reliably: with renderer=vulkan the GL
      context lives on a hidden window and the visible one is left to Vulkan */
-  if(g_want_vk){ WNDCLASSA gc={0}; gc.style=CS_OWNDC; gc.lpfnWndProc=DefWindowProcA; gc.hInstance=hi; gc.lpszClassName="MetroidBeyondGL";   /* own class: its size must not reach wndproc */
-    RegisterClassA(&gc); g_glwnd=CreateWindowA("MetroidBeyondGL","Metroid Prime 4 Beyond GL",WS_POPUP,0,0,64,64,NULL,NULL,hi,NULL); }
+  if(g_want_vk){ WNDCLASSA gc={0}; gc.style=CS_OWNDC; gc.lpfnWndProc=DefWindowProcA; gc.hInstance=hi; gc.lpszClassName="MetroidPrime4RecompGL";   /* own class: its size must not reach wndproc */
+    RegisterClassA(&gc); g_glwnd=CreateWindowA("MetroidPrime4RecompGL","Metroid Prime 4 Beyond GL",WS_POPUP,0,0,64,64,NULL,NULL,hi,NULL); }
   g_hdc=GetDC(g_glwnd? g_glwnd : g_hwnd);
   { extern int g_snxvk_want; if(!g_snxvk_want) set_pixel_format(g_hdc); }   /* native Vulkan: no GL pixel format on its window (set later if it falls back) */
   if(g_want_fs) set_fullscreen(1);
@@ -465,7 +465,7 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   }
 }
 
-/* Mouse free aim. Dread aims freely while L is held, in the left stick's direction: while the mouse button set to l
+/* Mouse free aim. Free aim follows the left stick while L is held: while the mouse button set to l
    (right by default) is held, the mouse moves a virtual stick, which turns the aim. It starts centred (the arm points
    ahead), the mouse pushes it, and it stays where it was pushed (a stick needs no holding): ~150 counts at 100%
    sensitivity swing it from centre to the edge. The other mouse buttons press their Switch buttons */
@@ -548,7 +548,6 @@ void video_poll(void){
       if(sdl_ok && sdl_gcrumble){ int first= g_opt_ctrl_index>0? g_opt_ctrl_index-1 : 0, lastp= g_opt_ctrl_index>0? g_opt_ctrl_index : sdl_npad;
         for(int i=first;i<lastp && i<sdl_npad;i++) sdl_gcrumble(sdl_pad[i],ulo,uhi,ulo||uhi? 250 : 0); }
       if(xset && g_xpad>=0){ XVIB v={ulo,uhi}; xset((DWORD)g_xpad,&v); } } }
-  { extern u64 skip_hold_filter(u64); if(!ov_is_open()) b=skip_hold_filter(b); }   /* main.c: hold - to skip a cutscene */
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
 }
 

@@ -79,8 +79,8 @@ void syncpt_add_quiet(u32 id, u32 n){ extern void syncpt_incr(u32); while(n--) s
 void syncpt_events(void){}
 u64 kernel_find_symbol_exact(const char* name){ (void)name; return 0; }
 void loader_segments(void* each, void* ctx){ (void)each; (void)ctx; }
-/* the shipped-shader pass's RomFS readers (shipped_pass.c, prepare_shaders on): Metroid Dread keeps every shader in
-   system/shd/*.bshdat (the OpenGL pre-build reads the same), so only that folder is listed, not the 5 GB of packs */
+/* the shipped-shader pass's RomFS readers (shipped_pass.c, prepare_shaders on): only system/shd/*.bshdat
+   is listed (the OpenGL pre-build reads the same; Metroid Prime 4 has none, so it finds nothing) */
 int romfs_files(int (*each)(void*,const char*,u64,u64), void* ctx){
   extern int romfs_list(const char*, int (*)(void*,const char*,u64,u64), void*); return romfs_list("/system/shd/",each,ctx); }
 int romfs_peek(u64 off, void* dst, u64 n){ return romfs_read(off,dst,n)? -1 : 0; }

@@ -20,51 +20,9 @@ int g_opt_audio_surround_downmix=1;   /* Prime 4 mixes in 5.1 with dialogue in t
    build and renderer can draw it with clears (gpu_gl.c window pass, snxvk hdr.c present pass). Counted from presents,
    i.e. the frames that reach the screen, over half a second. Each rect: x, y (top-left origin), w, h, 0 back / 1 text */
 int g_opt_show_fps=0;
-/* Hold - to skip ([Gameplay] skip_cutscenes): while a cutscene the game marks skippable plays, holding - for 0.7 s
-   presses + then - for the player (the game's own skip: + shows its prompt, - confirms; the DLL patch in code_141.c
-   lets it work the first time). The prompt (gpu_gl.c skip_prompt_draw) shows "Hold (-) to skip" meanwhile.
-   Dread v2.1.0 layout: cutscene manager = [[GOT 0x9CBF0F0]], its player at +88; on the player +116 = skippable,
-   +1200 = state (2 playing, 6 skipping) - read the way the game's can-skip check F_906E2A0 reads them */
-int g_opt_skip_cut=0;
-volatile int g_skip_prompt;            /* a skippable cutscene is playing */
-volatile float g_skip_hold;            /* 0..1 while - is held, 1 while the skip is sent */
-static int guest_readable(u64 a, u64 n){ if(!a || a>=AS_SIZE || n>AS_SIZE-a) return 0; MemBlock b; mem_query(a,&b);
-  return (b.perm&PERM_R) && a>=b.addr && a-b.addr+n<=b.size; }
-/* 1 = a skippable cutscene plays, 2 = story pages (the new-game intro): their page controller is [[GOT 0x9D30938]],
-   +89 enabled and +88 showing; the DLL patch in code_127.c runs its own finish F_8ECEA24 on SWR_SKIP_INTRO=1 */
-int cutscene_skippable_now(void){
-  static int force=-1; if(force<0) force=getenv("SWR_TEST_SKIP_PROMPT")!=NULL;   /* test: show the prompt at any time */
-  if(force) return 1;
-  if(!g_opt_skip_cut) return 0;
-  { u64 slot=0x9D30938; if(guest_readable(slot,8)){ u64 p=gr64(slot); if(guest_readable(p,8)){ u64 o=gr64(p);
-        if(guest_readable(o,90) && GP(o)[89] && GP(o)[88]) return 2; } } }
-  u64 slot=0x9CBF0F0; if(!guest_readable(slot,8)) return 0;
-  u64 p=gr64(slot); if(!guest_readable(p,8)) return 0;
-  u64 mgr=gr64(p); if(!guest_readable(mgr+88,8)) return 0;
-  u64 pl=gr64(mgr+88); if(!guest_readable(pl,1204)) return 0;
-  return GP(pl)[116] && gr32(pl+1200)==2;
-}
+volatile int g_skip_prompt;            /* the native Vulkan renderer's top-left prompt overlay (snxvk hdr.c): nothing sets it */
+volatile float g_skip_hold;
 static void env_switch(const char* name, int on);
-u64 skip_hold_filter(u64 b){   /* Switch button bits: 10 = +, 11 = - */
-  static u64 held_since, seq, tap; static int done, intro_req;
-  const u64 PLUS=1ull<<10, MINUS=1ull<<11, HOLD=700000000ull;
-  u64 now=plat_ns(); int can=cutscene_skippable_now(); g_skip_prompt=can;
-  { static int pc=-1, pm; int m=(b&MINUS)!=0; if(can!=pc || m!=pm){ if(g_opt_skip_cut) LOG("cutscene: skippable %d, - %s\n",can,m? "down" : "up"); pc=can; pm=m; } }
-  if(intro_req && can!=2){ intro_req=0; env_switch("SWR_SKIP_INTRO",0); }   /* the pages closed: request done */
-  if(seq){ u64 el=now-seq; b&=~(PLUS|MINUS);   /* + for 120 ms, nothing, then - for 120 ms */
-    if(el<120000000ull) b|=PLUS; else if(el>=240000000ull && el<360000000ull) b|=MINUS; else if(el>=480000000ull){ seq=0; done=1; }
-    g_skip_hold=1; return b; }
-  if(tap){ if(now-tap<120000000ull) b|=MINUS; else tap=0; }   /* a short press, handed on after its release */
-  if(!(b&MINUS) || tap){ if(held_since && now-held_since<300000000ull && !(b&MINUS)) tap=now;
-    held_since=0; if(!(b&MINUS)) done=0; g_skip_hold=0; return b; }
-  if(!can || done){ held_since=0; g_skip_hold=0; return b; }
-  b&=~MINUS; if(!held_since) held_since=now;
-  float f=(float)(now-held_since)/(float)HOLD; g_skip_hold=f>1? 1 : f;
-  if(now-held_since>=HOLD){ held_since=0;
-    if(can==2){ intro_req=1; done=1; env_switch("SWR_SKIP_INTRO",1); LOG("cutscene: hold - to skip the story pages\n"); }
-    else { seq=now; LOG("cutscene: hold - to skip\n"); } }
-  return b;
-}
 int fps_overlay_rects(int W,int H,int (*r)[5],int max){
   static u64 t0;static u32 frames;static int fps=-1;
   if(!g_opt_show_fps){t0=0;frames=0;fps=-1;return 0;}
@@ -103,9 +61,7 @@ int g_opt_diag=0;
 #endif
 int g_opt_docked=0, g_opt_lang=1, g_opt_res=1, g_opt_fps=1, g_opt_vsync=VSYNC_DEFAULT, g_opt_drs=0;
 int g_opt_media_turns=1;   /* serialize_media_threads, read by kernel.c core0_member */
-int g_opt_fast_load=0;     /* fast_loading, read by kernel.c SleepThread */
 int g_opt_sleep_waits=1;   /* sleep_waits, read by glq.c */
-static int aspect_given;   /* ini aspect= seen: ultrawide= no longer applies */
 int g_opt_hdr=0, g_opt_hdr_paper=200, g_opt_hdr_peak=0;   /* HDR output (native Vulkan): on, SDR white in nits, peak (0 = the display's) */
 int g_opt_aniso=0;         /* anisotropy: 0 = the game's, else at least that much (gpu_gl.c samplers, native Vulkan) */
 int g_opt_tex_threads=0;   /* texture_threads, read by gpu_gl.c pf_run: 0 auto, 1 off */
@@ -342,7 +298,6 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"game_dynamic_resolution")) g_opt_drs=atoi(v);   /* 1 = let the game's own DRS work */
     else if(!strcmp(k,"memory_gb")){ extern int g_opt_mem_gb; g_opt_mem_gb=atoi(v); }
     else if(!strcmp(k,"serialize_media_threads")) g_opt_media_turns=atoi(v);
-    else if(!strcmp(k,"fast_loading")) g_opt_fast_load=atoi(v);
     else if(!strcmp(k,"sleep_waits")) g_opt_sleep_waits=atoi(v);
     else if(!strcmp(k,"hdr")) g_opt_hdr=atoi(v);   /* native Vulkan HDR output (snxvk hdr.c) */
     else if(!strcmp(k,"hdr_paper_white")){ g_opt_hdr_paper=atoi(v); if(g_opt_hdr_paper<80) g_opt_hdr_paper=80; if(g_opt_hdr_paper>1000) g_opt_hdr_paper=1000; }
@@ -355,13 +310,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"show_fps")) g_opt_show_fps=atoi(v)!=0;   /* FPS counter, live */
     else if(!strcmp(k,"cheats")){ extern int g_opt_cheats; g_opt_cheats=atoi(v)!=0; }   /* cheats.c, live */
     else if(!strcmp(k,"fov")){ extern int g_opt_fov; g_opt_fov=atoi(v); if(g_opt_fov<60) g_opt_fov=60; if(g_opt_fov>160) g_opt_fov=160; }   /* cheats.c FOV hook, live */
-#ifndef SWR_NO_SKIPCUT
-    else if(!strcmp(k,"skip_cutscenes")){ g_opt_skip_cut=atoi(v)!=0; env_switch("SWR_SKIP_CUTSCENES",g_opt_skip_cut); }   /* read by the game DLL (code_141.c F_906E2A0), live */
-#endif
     else if(!strcmp(k,"anisotropy")){ g_opt_aniso=atoi(v); if(g_opt_aniso<0) g_opt_aniso=0; if(g_opt_aniso>16) g_opt_aniso=16; }
-    else if(!strcmp(k,"ultrawide")){ extern int g_opt_ultrawide; if(!aspect_given) g_opt_ultrawide=atoi(v); }   /* loader.c: theboy181's 21:9 patch */
-    else if(!strcmp(k,"aspect") && *v){ extern int g_opt_ultrawide;   /* aspect=16:9|21:9|16:10; overrides ultrawide= in any order */
-      aspect_given=1; g_opt_ultrawide= !strcmp(v,"21:9")? 1 : !strcmp(v,"16:10")? 2 : 0; }
     else if(!strcmp(k,"dlss")){ extern int snxvk_dlss_mode; snxvk_dlss_mode=atoi(v); }   /* native Vulkan: snxvk dlss.c; OpenGL: dlss_gl.c + gpu_gl.c dlg_* */
     else if(!strcmp(k,"texture_threads")){ g_opt_tex_threads=atoi(v); if(g_opt_tex_threads<0) g_opt_tex_threads=0; if(g_opt_tex_threads>16) g_opt_tex_threads=16; }
     else if(!strcmp(k,"fast_forward")) g_opt_ff=atoi(v);
@@ -385,8 +334,6 @@ typedef struct { const char* title; const IniOpt* o; } IniSec;
 static const IniOpt INI_DISPLAY[]={
   {"docked","0","1 = TV mode (1920x1080 / 1600x900 games), 0 = handheld mode (1280x720)"},
   {"fullscreen","1","1 = start in fullscreen (F11 or Alt+Enter toggles it in game)"},
-  {"aspect","","Picture shape (docked mode): 16:9, 21:9 (= ultrawide=1) or 16:10 (1440x900 base, fills a Steam Deck\n;   1280x800 or a 1920x1200 screen). Empty = use ultrawide=; when set it overrides ultrawide="},
-  {"ultrawide","0","Metroid Dread only (a patch for its v2.1.0 code): no effect on Metroid Prime 4 Beyond"},
   {"language","1","Game language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish,\n;   6 Chinese, 7 Korean, 8 Dutch, 10 Russian, 11 Taiwanese, 12 English (UK),\n;   13 French (Canada), 14 Spanish (Latin America)"},
   {NULL,NULL,NULL}};
 static const IniOpt INI_GRAPHICS[]={
@@ -394,9 +341,6 @@ static const IniOpt INI_GRAPHICS[]={
   {"dynamic_resolution","0","1 = lower the resolution automatically when the GPU can't keep up (down to dynamic_resolution_min)"},
   {"dynamic_resolution_min","0.6","Lowest internal resolution allowed by dynamic_resolution"},
   {"game_dynamic_resolution","0","1 = let the game lower its own resolution like on the console (0 = always full resolution)"},
-#ifndef SWR_NO_SKIPCUT
-  {"skip_cutscenes","0","1 = hold - (or + then -) to skip any cutscene the game lets you skip, even the first time; a prompt shows top left"},
-#endif
   {"show_fps","0","1 = FPS counter in the top-left corner (frames that reach the screen)"},
   {"upscaler","bilinear","How a picture smaller than the window is enlarged: bilinear, or fsr = AMD FidelityFX FSR 1\n;   (edge-adaptive upscaling + sharpening; OpenGL renderer). Pair it with resolution below 1, e.g. 0.67"},
   {"fsr_sharpness","80","FSR 1 sharpening (RCAS), 0-100"},
@@ -431,7 +375,6 @@ static const IniOpt INI_PERF[]={
   {"shader_threads","0","Linux: threads that compile new shaders at the same time, 0 = automatic (a quarter of the CPU\n;   threads, 2 to 8), 1 = one like older versions (restart)"},
   {"fast_forward","0","1 = Tab (or both stick clicks, L3+R3) toggles fast forward: the game clock runs faster, e.g. to\n;   shorten elevator and train rides (their animations follow the clock). Turn it off again before playing"},
   {"fast_forward_speed","3","Fast forward speed, 2-8 times"},
-  {"fast_loading","0","1 = shorten the game's fixed 60 ms pauses during loads and reloads to 1 ms (faster loading;\n;   0 = keep the console's original timing)"},
   {"sleep_waits","1","1 = threads waiting on the OpenGL thread sleep instead of spinning (frees CPU on 2-4 core\n;   PCs and laptops); 0 = spin like older versions"},
   {"texture_threads","0","Threads that unpack texture loads: 0 = automatic (all cores), 1 = one thread like older versions"},
   {"serialize_media_threads","1","1 = video/media threads that share a core on the Switch take turns like on the console\n;   (guards against a rare freeze when a video stops); 0 = run them fully in parallel"},
@@ -465,8 +408,6 @@ static const IniOpt INI_AUDIO[]={
 /* front end (beyond_ui/fe.cpp) and in-game menu (beyond_ui/ov.cpp); the runtime itself only stores them */
 static const IniOpt INI_LAUNCHER[]={
   {"wait_for_shaders","1","1 = wait for new shaders before drawing (no missing objects, a short stutter the first time);\n;   0 = compile them in the background (no stutter, objects can pop in). Applies on the next start"},
-  {"loading_60fps","1","1 = draw elevator, train and loading screens at 60 FPS (the game draws them at 30)"},
-  {"cutscenes_60fps","0","Metroid Dread only (a patch for its v2.1.0 code): no effect on Metroid Prime 4 Beyond"},
   {"skip_launcher","0","1 = start the game directly, without the Play screen"},
   {"menu_shortcut","home","Controller button that opens the in-game menu (F1 on the keyboard always works):\n;   home = Home / Guide / PS button, minus_plus = - and + together, l3_r3 = both stick clicks held 1 second"},
   {"launcher_nav","1","1 = navigate the Play screen and menus with a controller"},
@@ -544,9 +485,7 @@ static void settings_drain(void){
   char q[32][2][256]; int n; pm_lock(&g_setq_lock); n=g_setq_n; memcpy(q,g_setq,sizeof q); g_setq_n=0; pm_unlock(&g_setq_lock);
   for(int i=0;i<n;i++){ const char* k=q[i][0]; const char* v=q[i][1];
     ini_store(k,v); ini_apply(k,v); g_ini_dirty=1; LOG("settings: %s=%s (in game)\n",k,v);
-    if(!strcmp(k,"cutscenes_60fps")) env_switch("SWR_CUTSCENES_60FPS",atoi(v)!=0);   /* read by the game DLL at every call */
-    else if(!strcmp(k,"loading_60fps")) env_switch("SWR_LOADING_60",atoi(v)!=0);
-    else if(!strcmp(k,"fullscreen")){ extern void backend_set_fullscreen(int); backend_set_fullscreen(atoi(v)!=0); } } }
+    if(!strcmp(k,"fullscreen")){ extern void backend_set_fullscreen(int); backend_set_fullscreen(atoi(v)!=0); } } }
 /* test only: SWR_TEST_SETTING="FRAME:key=value;FRAME:key=value" queues those changes at those guest frames */
 static void settings_test_hook(void){
   static const char* s; static int init; if(!init){ init=1; s=getenv("SWR_TEST_SETTING"); }
@@ -576,33 +515,9 @@ void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt
   free(lin);
 }
 
-/* Metroid Dread's slow motion (sliding under the wrecked E.M.M.I.): the main loop passes a time scale
-   (game object [[GOT 0x9CBF088]] +1700, float) to its frame timer F_8085CB8. Some game logic stops making
-   progress when the scaled step gets very small: at 240 FPS x 0.2 (0.8 ms per frame) Samus stays stuck under
-   the legs and dies. With a cap above 60, slow-motion frames are paced at 60, where it works as on the Switch.
-   g_pace_fps is the cap the pacers use; SWR_NO_SLOWMO_60=1 = old behaviour (tests). */
+/* the frame cap the pacers use */
 volatile int g_pace_fps=1;
-static void pace_update(void){
-  static int off=-1; if(off<0) off=getenv("SWR_NO_SLOWMO_60")!=NULL;
-  int f=g_opt_fps;
-  if(f>60 && !off){ u64 g=*(volatile u64*)GP(0x9CBF088ull); u64 o= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
-    if(o && o<(1ull<<40)){ float s; u32 v=*(volatile u32*)GP(o+1700); memcpy(&s,&v,4);
-      static int was; int slow= s>0.0f && s<0.95f;
-      if(slow!=was){ was=slow; LOG("slow motion %s (time scale %.3f): pacing at %d FPS\n",slow?"started":"ended",s,slow?60:f); }
-      if(slow) f=60; } }
-  /* Cinematics run at 30: the main loop sets its frame timer's target ([[GOT 0x9CBF0E8]] +64, float) to 30 and the game
-     makes a new picture every ~33 ms, give or take 2 ms. Shown the moment each arrives, they stayed on screen 29 or 37 ms
-     on a 240 Hz monitor (MEASURED, hold-0: 32-35 ms gaps) and stuttered; the Switch shows them every second 60 Hz
-     refresh. So while the target is 30 the pacers present on an exact 33.3 ms grid. Only when finished pictures are
-     shown changes. Not with the 60 FPS cutscene patch; SWR_NO_CINEMATIC_30=1 = old behaviour (tests) */
-  { static int no30=-1; if(no30<0) no30=getenv("SWR_NO_CINEMATIC_30")!=NULL;
-    static int was30; int c30=0;
-    if(!no30 && f!=0){ char b[8]; const char* e=getenv("SWR_CUTSCENES_60FPS"); (void)b;
-      if(!(e && e[0]=='1')){ u64 g=*(volatile u64*)GP(0x9CBF0E8ull); u64 t= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
-        if(t && t<(1ull<<40)){ float fps; u32 v=*(volatile u32*)GP(t+64); memcpy(&fps,&v,4); c30= fps>29.0f && fps<31.0f; } } }
-    if(c30!=was30){ was30=c30; LOG("cinematic pacing: %s\n",c30? "30 FPS, even 33.3 ms frames" : "back to the frame cap"); }
-    if(c30) f=30; }
-  g_pace_fps=f; }
+static void pace_update(void){ g_pace_fps=g_opt_fps; }
 
 void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt){
   pace_update();
@@ -788,25 +703,6 @@ static void hook_init(void){
   if(p){ g_hk_ptr=strtoull(p,NULL,0); LOG("hook: watching guest pointer %llx\n",(unsigned long long)g_hk_ptr); }
   atexit(hook_atexit); plat_thread(hook_thread,NULL,64*1024); }
 
-/* Diagnostic: SWR_TRACE_FRAMETIMER=1 logs Metroid Dread's frame timer (F_8085CB8)
-   about once a second: object = [[0x9CBF0E8]]; +44 frame counter, +48 dt (s),
-   +56 minimum frame time (ms), +64 target fps, +68 frame duration, +72 clamp flag. */
-static void frametimer_trace(void){
-  static int on=-1; static u64 last;
-  if(on<0) on= getenv("SWR_TRACE_FRAMETIMER")!=NULL;
-  if(!on) return;
-  u64 now=plat_ns(); if(now-last<1000000000ull) return; last=now;
-  u64 g=*(volatile u64*)GP(0x9CBF0E8ull);
-  u64 t= (g && g<(1ull<<40))? *(volatile u64*)GP(g) : 0;
-  { static int said; if(said<3){ said++; LOG("frametimer: got %llx -> %llx\n",(unsigned long long)g,(unsigned long long)t); } }
-  if(!t || t>(1ull<<40)) return;
-  float dt,fps,dur; u32 a=*(volatile u32*)GP(t+48),b=*(volatile u32*)GP(t+64),d=*(volatile u32*)GP(t+68);
-  memcpy(&dt,&a,4); memcpy(&fps,&b,4); memcpy(&dur,&d,4);
-  LOG("frametimer: obj %llx frames %u dt %.5f min_ms %lld fps %.2f dur %.5f clamp %u\n",(unsigned long long)t,*(volatile u32*)GP(t+44),dt,
-      (long long)*(volatile i64*)GP(t+56),fps,dur,(unsigned)*(volatile u8*)GP(t+72)); }
-
-static void frametimer_poll(void){ frametimer_trace(); }
-
 void services_init(void){
   extern void svc_core_init(void), svc_hid_init(void), svc_fs_init(void), svc_vi_init(void), svc_pl_init(void), svc_launcher_init(void);
   svc_core_init(); svc_hid_init(); svc_fs_init(); svc_vi_init(); nv_init(); svc_pl_init(); svc_launcher_init();
@@ -838,9 +734,9 @@ int swr_main(int argc, char** argv){
 #if !defined(_WIN32)
   { /* no Play screen here (Linux; on Windows the Play screen sets them, or the old Python launcher does): the [Launcher] choices the game reads as switches, as fe.cpp sets them on Windows.
        A switch already in the environment (tests, a launch script) is left as it is */
-    static const char* const L[][3]={{"wait_for_shaders","SWR_SYNC_SHADERS","1"},{"loading_60fps","SWR_LOADING_60","1"},{"cutscenes_60fps","SWR_CUTSCENES_60FPS","0"}};
+    static const char* const L[][3]={{"wait_for_shaders","SWR_SYNC_SHADERS","1"}};
     if(!getenv("SWR_TEST_SCRIPT") && !getenv("SWR_TEST_EXIT_FRAME"))
-      for(int i=0;i<3;i++) if(!getenv(L[i][1]) && atoi(ini_get(L[i][0],L[i][2]))) env_switch(L[i][1],1); }
+      for(int i=0;i<1;i++) if(!getenv(L[i][1]) && atoi(ini_get(L[i][0],L[i][2]))) env_switch(L[i][1],1); }
 #endif
   for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"-v")) g_verbose=2; else if(!strncmp(argv[i],"--",2) && strchr(argv[i],'=')){ char k[256]; const char* opt=argv[i]+2; const char* e=strchr(opt,'='); size_t key_len=(size_t)(e-opt); if(key_len>=sizeof k) continue; memcpy(k,opt,key_len); k[key_len]=0; const char* value=e+1; backend_ini(k,value); if(!strcmp(k,"docked")) g_opt_docked=atoi(value); if(!strcmp(k,"fps_limit")) g_opt_fps=atoi(value); else if(!strcmp(k,"profile")) g_opt_prof=atoi(value); } }
   snprintf(g_datadir,sizeof g_datadir,"%s%s_data/",g_exedir,g_exename);
@@ -869,7 +765,7 @@ int swr_main(int argc, char** argv){
   /* 60Hz frontend loop */
   u64 next=plat_ns(); int tick=0;
   while(!g_quit){
-    video_poll(); hid_update(); vsync_tick_vt(); frametimer_poll(); ff_poll(); settings_test_hook(); settings_drain();
+    video_poll(); hid_update(); vsync_tick_vt(); ff_poll(); settings_test_hook(); settings_drain();
     if(tick%60==0) ini_poll();
     { extern void kernel_heal_mutexes(void); kernel_heal_mutexes(); }
     /* bail out of the slow clock if nothing was presented for 3s */
@@ -957,8 +853,8 @@ int audren_update(SvcObj* o, IpcCtx* c){
     u32 ns= st==4? 5 : st==2? 3 : st; memcpy(q+i*0x10,&ns,4); }
   q+=o_mp;
   extern void audio_render(SvcObj*,const u32*,const u8*,u64,const u8*,u32,u8*);
-  /* The console's audio hardware mixes 5 ms every 5 ms on its own; RequestUpdate only changes what it mixes. Dread
-     updated every 5 ms, so one block per update was enough. Metroid Prime 4 updates once a frame (60 a second), and one
+  /* The console's audio hardware mixes 5 ms every 5 ms on its own; RequestUpdate only changes what it mixes. A game
+     that updates every 5 ms needs one block per update. Metroid Prime 4 updates once a frame (60 a second), and one
      block per update gave 0.3 s of sound per second: choppy audio with gaps. Mix as many 5 ms blocks as real time has
      passed since the last update (at least one, at most 8 after a stall; the remainder carries over, so the long-run
      rate is exactly 48 kHz). The extra blocks see the same voices without the once-per-update actions (a new voice's

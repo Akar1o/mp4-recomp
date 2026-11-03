@@ -22,7 +22,7 @@ vulkan_native/
 # Linux build output (linux/*.sh)
 *.so
 linux/test/
-linux/dist/MetroidBeyond-Linux/
+linux/dist/MetroidPrime4Recomp-Linux/
 linux/dist/*.tar.gz
 linux/dist/*.AppImage
 linux/appimage/cache/

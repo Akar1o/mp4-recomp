@@ -461,10 +461,10 @@ void progress_bar(float frac, ImVec2 size, const char* text) {
 
 // ---------------------------------------------------------------- resolution text
 float game_base_w(bool docked, const char* aspect) {
-    if (!docked) return 1280; if (aspect && !strcmp(aspect, "21:9")) return 1680; if (aspect && !strcmp(aspect, "16:10")) return 1440; return 1600;
+    (void)aspect; return docked ? 1600 : 1280;
 }
 float game_base_h(bool docked, const char* aspect) {
-    if (!docked) return 720; if (aspect && !strcmp(aspect, "21:9")) return 720; return 900;
+    (void)aspect; return docked ? 900 : 720;
 }
 std::string res_text(float s, bool docked, const char* aspect) {
     int w = (int)(game_base_w(docked, aspect) * s), h = (int)(game_base_h(docked, aspect) * s);
@@ -485,9 +485,6 @@ static std::vector<Opt> build_options() {
     // Display
     B("docked", "Display", "Display", "Docked (TV) mode", LIVE_RESTART, "1", "Docked: the game renders 1600\xC3\x97" "900. Handheld: 1280\xC3\x97" "720.");
     B("fullscreen", "Display", "Display", "Fullscreen", LIVE_YES, "1", "F11 or Alt+Enter also switches it.");
-    C("aspect", "Display", "Display", "Picture shape", LIVE_RESTART, "16:9", {{"16:9", "16:9"}, {"21:9", "21:9 ultrawide"}, {"16:10", "16:10"}},
-      "21:9 is theboy181's patch (commissioned by Nikorasu081); 16:10 uses the same spot for 1440\xC3\x97" "900 (Steam Deck, 1920\xC3\x97" "1200). "
-      "Both need Docked mode and may cut off a little in videos and some menus.");
     C("language", "Display", "Display", "Language", LIVE_RESTART, "1", {{"0", "Japanese"}, {"1", "English (US)"}, {"2", "French"}, {"3", "German"},
       {"4", "Italian"}, {"5", "Spanish"}, {"6", "Chinese"}, {"7", "Korean"}, {"8", "Dutch"}, {"10", "Russian"},
       {"11", "Taiwanese"}, {"12", "English (UK)"}, {"13", "French (Canada)"}, {"14", "Spanish (Latin America)"}}, "");
@@ -524,12 +521,6 @@ static std::vector<Opt> build_options() {
     B("show_fps", "Graphics", "Gameplay", "FPS counter", LIVE_YES, "0", "Shows the frames per second that reach the screen, in the top-left corner.");
     I("fov", "Gameplay", "Gameplay", "Field of view", LIVE_YES, "100", 60, 160, 5, "Percent of the game's own field of view. Needs a FOV hook for your game build (beyond/fov_hooks.txt).");
     B("cheats", "Gameplay", "Gameplay", "Cheat codes", LIVE_YES, "1", "Runs the cheats you turn on in the Cheats page (Atmosphere format files in the game's cheats folder).");
-    B("loading_60fps", "Launcher", "Gameplay", "60 FPS elevators and loading screens", LIVE_YES, "1", "The game draws them at 30.");
-#ifndef SWR_NO_SKIPCUT
-    B("skip_cutscenes", "Gameplay", "Gameplay", "Skip any cutscene", LIVE_YES, "0", "Hold - to skip a cutscene, even the first time you see it. A prompt shows in the top-left corner while you can.");
-#endif
-    B("cutscenes_60fps", "Launcher", "Gameplay", "60 FPS cutscenes (theboy181)", LIVE_YES, "0", "Port of theboy181's 60fps patch: cinematics show a new picture every 1/60 s.");
-    B("fast_loading", "Performance", "Gameplay", "Fast loading", LIVE_YES, "0", "Shortens the game's fixed 60 ms pauses during loads (about 1 s faster first load).");
     B("fast_forward", "Performance", "Gameplay", "Fast-forward toggle (Tab or L3+R3)", LIVE_YES, "0", "For elevator and train rides. Don't leave it on during play.");
     I("fast_forward_speed", "Performance", "Gameplay", "Fast-forward speed", LIVE_YES, "3", 2, 8, 1, "");
     // Audio

@@ -41,10 +41,10 @@ static IoMap g_iom[1024]; static int g_niom;  static PMutex g_hlk; static int g_
 static void h_init(void){ if(!g_hinit){ pm_init(&g_hlk); g_hinit=1; } }
 
 /* romfs hook (svc_fs.c): remember the .webm files the game reads, newest first. VP9 video uses them (vp9video.inc) */
-/* Every .webm the game has opened, most recent first. Dread opens each video once
-   (the title videos at boot) and replays it later from memory, so the list must not
+/* Every .webm the game has opened, most recent first. A game can open a video once
+   (e.g. title videos at boot) and replay it later from memory, so the list must not
    forget files: a replayed video that cannot be matched to its file used to be shown
-   as frames of whatever video played last (e.g. the Game Over logo on save select). */
+   as frames of whatever video played last. */
 #define V9_FILES 64
 static const char* g_v9_recent[V9_FILES];
 void vp9_note_file(const char* path){

@@ -4,8 +4,8 @@
 
 // this fork's GitHub repository (owner/name): the Play screen's updates and its bug report page. Set it to where you
 // publish the fork; until then update checks find nothing (SWR_UPDATE_REPO overrides it at run time)
-#ifndef BEYOND_REPO
-#define BEYOND_REPO "CHANGE-ME/Metroid-Beyond-Recomp"
+#ifndef MP4_REPO
+#define MP4_REPO "linuxopt/mp4-recomp"
 #endif
 #include <vector>
 #include <map>
@@ -84,7 +84,7 @@ MigrateResult migrate(const OldInstall& o, bool settings, bool saves, bool mods,
 bool backup_saves(std::string* out_zip, std::string* err);
 std::string cpu_name();
 std::string reports_dir();
-bool make_report(const std::string& info, std::string* out_zip, std::string* err);   // reports\\Metroid-Beyond-report-<time>.zip: logs + settings
+bool make_report(const std::string& info, std::string* out_zip, std::string* err);   // reports\\MP4-Recomp-report-<time>.zip: logs + settings
 std::string backups_dir();
 
 // ---------------------------------------------------------------- mods (LayeredFS folders + load_order.txt, same format as the Python launcher)

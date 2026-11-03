@@ -1,8 +1,7 @@
-# Metroid Prime 4: Beyond — recompiled for PC (Linux first)
+# Metroid Prime 4 Recomp — developer notes (Linux first)
 
 > **Developer notes.** Players: see [README.md](README.md) for installing and playing, and for the list of fixes.
-> This is a fork of [Metroid Dread Recomp](https://github.com/DaniSald/Metroid-Dread-Recomp)
-> retargeted at Metroid Prime 4: Beyond (Switch 1 build, program `010019A01E2F2000`, main build
+> Metroid Prime 4 Recomp targets Metroid Prime 4: Beyond (Switch 1 build, program `010019A01E2F2000`, main build
 > `8275FBE1EC5191C279F3A943AD8524F4BAB087A3`, NintendoSDK 19.3.15). The whole game translates and compiles to a native
 > Linux library and plays: boot, menus, gameplay, the scan visor, audio and videos work. The **Status** section below is
 > the bring-up log from the first sessions; later rendering, stutter and audio fixes are listed in the README.
@@ -40,7 +39,7 @@ GCC, a Play / settings screen, and an in-game menu (F1 or the Home / Guide butto
 | **Cheats** in the Atmosphere / dmnt format (the `.txt` files Atmosphere, Ryujinx and Yuzu use), on/off per cheat in the in-game menu, reloaded when the file changes | `runtime/cheats.c`, menu: **Cheats** page | built and unit-tested (`bash linux/cheats_test.sh`) |
 | **FOV slider** (percent of the game's own FOV, live) | `runtime/cheats.c` FOV hook, `beyond/fov_hooks.txt` | mechanism built and tested; the camera address for Prime 4 still has to be found |
 | **AMD FidelityFX FSR 1** upscaling (EASU + RCAS) with a sharpness slider | `runtime/gpu_gl.c`, `third_party/fsr1` (MIT) | works: runs in game on radeonsi; on a fixed test picture EASU + RCAS give smooth edges where bilinear shows steps (mean gradient 10.1 bilinear, 11.3 FSR) |
-| Fork naming: `Metroid-Beyond-Recomp`, `~/.local/share/MetroidBeyondRecomp`, `METROID_BEYOND_HOME` | everywhere | done |
+| Project naming: Metroid Prime 4 Recomp, `~/.local/share/MetroidPrime4Recomp`, `MP4_RECOMP_HOME` (an older `MetroidBeyondRecomp` install is moved on first start) | everywhere | done |
 
 ### Cheats
 
@@ -81,7 +80,7 @@ picture is enlarged to the window; FXAA and the CAS sharpening are skipped then 
 3. Fixed: `fsp-srv` command 205 returned a stub, so the game read through a null storage object while mounting its
    RomFS.
 4. Fixed: `nn::hid::GetSixAxisSensorStates` aborted (`UnexpectedDefault`). Player 1 was reported as Full Key **and**
-   Joy-Con Dual at once (as set up for Dread); Prime 4 picked Joy-Con Dual, a style it had requested no six-axis handles
+   Joy-Con Dual at once; Prime 4 picked Joy-Con Dual, a style it had requested no six-axis handles
    for, and passed an all-zero handle (style index 0 - 3). Player 1 now reports one style, chosen from the game's
    `SetSupportedNpadStyleSet`.
 5. Fixed: the audio renderer rejected the game's updates ("malformed update layout"): REV15 voices are 0x188 bytes.
@@ -109,8 +108,8 @@ picture is enlarged to the window; FXAA and the CAS sharpening are skipped then 
     renderer update; Prime 4 updates 60 times a second, so it got 0.3 s of sound per second and the output ran empty
     nearly every block. Each update now mixes what real time needs. `SWR_VIDEO_TIMING=1` also logs the update rate and
     underruns, and the Play screen passes it on to the game.
-11. Fixed: the Play screen said "game files are missing" after a successful setup (it checked for Dread's RomFS
-    folders) and still showed Dread's title.
+11. Fixed: the Play screen said "game files are missing" after a successful setup (it checked for RomFS
+    folders this game does not have) and showed the wrong title.
 12. Fixed: black flashes. One vertex shader read the carry flag without the translator declaring it, so it never
     compiled and the object using it was skipped on most frames (2629 skipped draws in 84 s).
 13. Shaders before play: the translator still lacks `LDG`/`STG` (global memory), `VMNMX`, `ATOM` and `SUST`; the 61
@@ -164,7 +163,7 @@ picture is enlarged to the window; FXAA and the CAS sharpening are skipped then 
     refresh). Diagnostics: `SWR_STALL_DUMP=1` (thread states when frames stop), slow GPU methods / GL calls in the log.
 19. Now: the loading icon, the intro video, the publisher logo, the title screen and the first area run; the game runs without stopping
    (40 s tested). **Next**: play past the boot sequence (title screen, input, saves, the first area) and fix what
-   comes up there, plus game-specific fixes like Dread's patch set (`beyond/beyond_patches.json`, empty for now).
+   comes up there, plus game-specific patches (`beyond/beyond_patches.json`, empty for now).
 
 Test loop used during bring-up: build the runtime without the Play screen (`SWR_NO_LINUX_FRONTEND=1`), copy it next to
 the compiled game and read `Metroid Prime 4 Beyond.log`.
@@ -183,9 +182,9 @@ bash linux/run.sh
 
 ### AppImage
 
-`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Prime_4_Beyond-x86_64.AppImage`: the runtime with the Play /
+`bash linux/make_appimage.sh` builds `linux/dist/Metroid_Prime_4_Recomp-x86_64.AppImage`: the runtime with the Play /
 setup screens, the recompiler, a relocatable GCC 14.3 and Python 3.12, so nothing needs to be installed and no game
-files are inside. The game is installed in `~/.local/share/MetroidBeyondRecomp` (or `METROID_BEYOND_HOME`).
+files are inside. The game is installed in `~/.local/share/MetroidPrime4Recomp` (or `MP4_RECOMP_HOME`).
 It needs glibc 2.38 or newer, SDL2 for controllers, an OpenGL 4.3 driver and, for the game's videos, OpenH264 2.x
 (`openh264` / `libopenh264` package; without it videos stay black). With FFmpeg installed (the `libavcodec` the
 AppImage was built against) the faster FFmpeg decoder is used instead. `bash linux/build_openh264.sh` builds OpenH264 2.4.1
@@ -193,16 +192,11 @@ from source into the runtime instead (static, no system library needed); it has 
 
 ### Windows
 
-The Windows build (`build.bat`) is inherited from upstream and renamed, but has not been built or tested in this fork.
-
-### Before publishing the fork
-
-Set `BEYOND_REPO` in `runtime/beyond_ui/fe.h` to your GitHub `owner/name`: the Play screen's update check and its
-"Report a problem" button use it.
+The Windows build (`build.bat`) is renamed for this project, but has not been built or tested in this fork.
 
 ## Credits
 
-- **yozander2009-stack** and the Metroid Dread Recomp contributors: the project this is forked from
+- **yozander2009-stack** and contributors: the recompiled runtime and launcher this port is built from
 - **MZ Labs**: SwitchRecomp (Apache-2.0); the credit "SwitchRecomp by MZ Labs" and NOTICE.txt must be kept
 - **ScarletNX**: the native Vulkan renderer (GPL-3.0)
 - **AMD**: FidelityFX Super Resolution 1 (MIT, `third_party/fsr1/LICENSE.txt`)
@@ -217,4 +211,4 @@ The program icon is the [Metroid icon created by Smashicons - Flaticon](https://
 The released program is distributed under **GPL-3.0** (`LICENSE-GPL-3.0.txt`), because it contains the ScarletNX
 renderer. Each source file keeps its own licence; Apache-2.0 and MIT code is GPL-3.0-compatible.
 
-Metroid Prime 4: Beyond and Metroid Dread are © Nintendo. This project is not affiliated with or endorsed by Nintendo.
+Metroid Prime 4: Beyond is © Nintendo. This project is not affiliated with or endorsed by Nintendo.

@@ -65,7 +65,7 @@ void nv_gpu_call_after(u32 n, u32* id, const u32* val, void (*fn)(void*), void* 
 #define NV_FDS        256   /* nvdrv's fds */
 #define NV_GMMU_L1    65536 /* the GPU page table's first-level entries (nvdrv.c's GL1) */
 /* ctrl fds with event slots in use at once. Each NvRm user (NVN, a movie player, the video decoder) opens one: games
-   hold a handful, Metroid Dread two */
+   hold a handful */
 #define NV_CTRL_TABLES 64
 
 /* an nvmap handle (nvh, by handle number). CREATE and each FROM_ID take a reference, FREE gives one back and the

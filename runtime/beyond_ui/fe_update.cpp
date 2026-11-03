@@ -22,9 +22,9 @@
 
 namespace fe {
 
-static const wchar_t* UA = L"MetroidBeyondRecomp-updater";
+static const wchar_t* UA = L"MetroidPrime4Recomp-updater";
 /* this fork's GitHub repository (owner/name): updates and bug reports point here. SWR_UPDATE_REPO overrides it */
-static const char* REPO = getenv("SWR_UPDATE_REPO") ? getenv("SWR_UPDATE_REPO") : BEYOND_REPO;
+static const char* REPO = getenv("SWR_UPDATE_REPO") ? getenv("SWR_UPDATE_REPO") : MP4_REPO;
 
 struct ManFile { std::string sha, path; long long size = 0; };
 struct Manifest { std::string version, tag, pkg, pkg_sha; long long pkg_size = 0; std::vector<ManFile> files; bool ok = false; };

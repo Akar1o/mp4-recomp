@@ -77,8 +77,8 @@ void kobj_signal(KObj* o){ pm_lock(&g_klock); kobj_signal_nl(o); pm_unlock(&g_kl
 
 /* ============================================================ shared-core turns
    On the Switch, threads pinned to the same core run one at a time, and a thread keeps the core until it
-   blocks (same-priority threads do not preempt each other). Metroid Dread's movie stack (main, Android
-   ALooper/MediaCodec, OMX dispatcher, NVIDIA NvMMLite decoder threads) all sit on core 0 at priority 44.
+   blocks (same-priority threads do not preempt each other). A movie stack (main, Android
+   ALooper/MediaCodec, OMX dispatcher, NVIDIA NvMMLite decoder threads) can all sit on core 0 at one priority.
    Here every guest thread is a real host thread, so they run truly in parallel, and MediaCodec flush/stop
    occasionally never gets its reply (main waits forever, every media thread idle).
    With SWR_CORE0_SERIAL=1 those threads take turns like on the console: a thread holds the turn while it
@@ -769,17 +769,6 @@ static void swr_svc_(CPU* c, u32 imm){
           }}}
       }
     }
-    /* fast_loading: Metroid Dread's load/reload code calls F_80860B0(60) = SleepThread(60 ms) unconditionally at three
-       places (F_821E1A4, F_81D6ED8, F_821E8CC); nothing is checked around them. With the option on they last 1 ms.
-       Matched by return address (F_80860B0 tail-calls, so the caller's return address is in x30 or the first frames). */
-    { extern int g_opt_fast_load; static int env=-1; if(env<0){ const char* e=getenv("SWR_FAST_LOADING"); env= e&&e[0]? e[0]=='1' : -2; }
-      int on= env==-2? g_opt_fast_load : env;
-      if(on && ns==60000000){ static const u64 sites[3]={0x821E1F4ull,0x81D6F04ull,0x821E908ull}; int hit=0;
-        u64 ra=x[30], fp=x[29];
-        for(int k=0;k<4 && !hit;k++){ for(int s=0;s<3;s++) if(ra==sites[s]) hit=1;
-          if(hit || !fp) break; MemBlock b; mem_query(fp,&b); if(!(b.perm&PERM_R) || fp<b.addr || fp+16>b.addr+b.size) break;
-          ra=gr64(fp+8); u64 nfp=gr64(fp); if(nfp<=fp) break; fp=nfp; }
-        if(hit){ static u64 n; if(!n++) LOG("fast loading: the game's fixed 60 ms load pauses are shortened to 1 ms\n"); ns=1000000; } } }
     if(ns<=0)plat_yield();else plat_sleep_ns(ns);
     trace_main_call(t,c,imm,x[30],wait_start,(u64)ns);
     if(t->is_main&&x[30]==0x82252bcull){__atomic_add_fetch(&g_guest_poll_ns,plat_ns()-wait_start,__ATOMIC_RELAXED);__atomic_add_fetch(&g_guest_poll_calls,1,__ATOMIC_RELAXED);}
