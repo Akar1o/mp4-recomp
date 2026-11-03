@@ -28,8 +28,24 @@ fetch python.tar.gz "$PY_URL" "$PY_SHA"
 fetch appimagetool "$TOOL_URL"
 chmod +x "$C/appimagetool"
 
-# the runtime as released on Windows (SWR_RELEASE: no frame generation, no DLSS notes), with the front end
-SWR_RELEASE=1 bash "$W/linux/setup_and_build_runtime.sh" > /dev/null
+# the runtime as released on Windows (SWR_RELEASE: no frame generation, no DLSS notes), with the front end. Built with
+# the same Bootlin GCC (glibc 2.41, generic x86-64), not the distro's: a distro build needs that distro's glibc, and its
+# CPU level when the distro is built for one (CachyOS znver4's crt files and libstdc++ made it x86-64-v4: "CPU ISA level
+# is lower than required" on a Steam Deck). X11, GL, FFmpeg and Vulkan headers come from this machine after the
+# toolchain's own; libX11 and libGL are linked by name only
+BG="$C/bootlin"; BGCC="$BG/bin/x86_64-buildroot-linux-gnu-gcc"
+[ -x "$BGCC" ] || { echo "unpacking GCC for the runtime"; rm -rf "$BG"; mkdir -p "$BG"; tar -xf "$C/gcc.tar.xz" -C "$BG" --strip-components=1; }
+SI="$C/sysinc"; SL="$C/syslib"; rm -rf "$SI" "$SL"; mkdir -p "$SI" "$SL"
+for d in X11 GL KHR libavcodec libavutil vulkan vk_video; do [ -d "/usr/include/$d" ] && ln -s "/usr/include/$d" "$SI/$d"; done
+for l in X11 GL; do f=$(ls /usr/lib/lib$l.so.? /usr/lib64/lib$l.so.? /usr/lib/x86_64-linux-gnu/lib$l.so.? 2>/dev/null | head -1 || true)
+  [ -n "$f" ] || { echo "error: no lib$l.so on this machine" >&2; exit 1; }; ln -s "$f" "$SL/lib$l.so"; done
+rm -f "$RUNTIME"   # so a failed build cannot leave the distro-built one in place
+SWR_RUNTIME_CC="$BGCC" SWR_RUNTIME_DEFS="-idirafter $SI -L$SL -Wl,--allow-shlib-undefined" SWR_RELEASE=1 \
+  bash "$W/linux/setup_and_build_runtime.sh" > /dev/null
+# what the player's machine needs: no CPU level above the baseline, no glibc newer than the toolchain's
+readelf -n "$RUNTIME" | grep -q 'ISA needed:.*x86-64-v[234]' && { echo "error: the runtime needs a newer CPU than x86-64" >&2; exit 1; }
+G=$(objdump -T "$RUNTIME" | grep -o 'GLIBC_2\.[0-9]*' | sort -uV | tail -1)
+[ "$(printf '%s\nGLIBC_2.41\n' "$G" | sort -V | tail -1)" = GLIBC_2.41 ] || { echo "error: the runtime needs $G" >&2; exit 1; }
 grep -qa "FIRST-TIME SETUP" "$RUNTIME" || { echo "error: the runtime was built without the front end (SWR_NO_LINUX_FRONTEND?)" >&2; exit 1; }
 
 rm -rf "$A"; mkdir -p "$A/usr/bin" "$R/beyond" "$R/runtime" "$R/linux" "$A/usr/share/metroid-prime-4-recomp/licenses"

@@ -42,7 +42,7 @@ Everything that changed is listed below.
 
 ## Requirements
 
-- **Linux, x86-64**, glibc 2.38 or newer. X11, or Wayland through XWayland.
+- **Linux, any x86-64 CPU** (Steam Deck included), glibc 2.38 or newer. X11, or Wayland through XWayland.
 - **GPU:** an OpenGL 4.3+ driver (Mesa or NVIDIA). Developed and tested on an **AMD Radeon RX 9070 XT** with Mesa 26.2
   (radeonsi).
 - **SDL2** (controllers and audio) and **zlib**, which most distributions already ship.
@@ -248,6 +248,8 @@ from the same save), traced to a root cause and checked again in the game.
 - `fsp-srv` 205 (`OpenDataStorageWithProgramIndex`): the game mounts its RomFS.
 - HID: player 1 reports a single controller style, fixing the six-axis abort at boot.
 - The Play screen checks for Prime 4's data and shows Prime 4's titles.
+- The AppImage runs on any x86-64 CPU: its program is built with the bundled toolchain instead of the build
+  machine's, which had made it need AVX-512 and glibc 2.43 ("CPU ISA level is lower than required" on a Steam Deck).
 - Cheats in Atmosphere / dmnt format, toggled per cheat in the in-game menu.
 - AMD FidelityFX FSR 1 upscaling with a sharpness slider.
 

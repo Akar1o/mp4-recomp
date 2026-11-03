@@ -17,6 +17,7 @@ mkdir -p runtime/vp9/lin
 VPX=$(gcc -print-file-name=libvpx.a)
 if [ -f "$VPX" ]; then cp -f "$VPX" runtime/vp9/lin/libvpx.a
 else rm -f runtime/vp9/lin/libvpx.a; echo "warning: no static libvpx.a (package libvpx-dev): building without the VP9 videos" >&2; fi
-"$PY" switchrecomp.py --build-runtime --cc gcc --target linux --backend x11 2>&1 | tail -60
+# SWR_RUNTIME_CC: another compiler (make_appimage.sh passes the bundled Bootlin GCC, so the release runs on other distros)
+"$PY" switchrecomp.py --build-runtime --cc "${SWR_RUNTIME_CC:-gcc}" --target linux --backend x11 2>&1 | tail -60
 [ -x "$RUNTIME" ] || { echo "runtime build failed" >&2; exit 1; }
 ls -la "$RUNTIME"
