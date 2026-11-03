@@ -163,7 +163,7 @@ static std::string pick(const char* title, bool folder, const char* pattern) {
     return code == 0 ? r : std::string();
 }
 std::string pick_folder(void*, const char* title) { return pick(title, true, nullptr); }
-std::string pick_file(void*, const char* title, const wchar_t*, const wchar_t* fspec) { std::string p = utf8(fspec ? fspec : L""); return pick(title, false, p.empty() ? nullptr : p.c_str()); }
+std::string pick_file(void*, const char* title, const wchar_t*, const wchar_t* fspec) { std::string p = utf8(fspec ? fspec : L""); for (auto& c : p) if (c == ';') c = ' '; return pick(title, false, p.empty() ? nullptr : p.c_str()); }
 void open_in_explorer(const std::string& p) { run_detached({"xdg-open", p}); }
 void open_in_notepad(const std::string& p) { run_detached({"xdg-open", p}); }
 

@@ -7,7 +7,10 @@ with the bundled GCC and links Metroid Prime 4 Beyond_code.dll next to the EXE.
 Output protocol on stdout (one line each): '@@P <percent> <stage>|<detail>' progress, '@@E <message>' failure,
 '@@D' done; everything else is log. Every stage leaves a marker so a stopped or failed setup continues where it was.
 
-Usage: beyond_setup.py --out DIR --name "Metroid Prime 4 Beyond" --base DIR [--update DIR]
+Usage: beyond_setup.py --out DIR --name "Metroid Prime 4 Beyond" --base DIR|FILE [--update DIR|FILE] [--keys prod.keys]
+
+The game and the update can also be the player's .xci / .nsp files: the game EXE unpacks them first (--nx-extract,
+runtime/nxextract.c) with the player's own prod.keys, into <name>_files next to it.
 
 On Linux (linux/setup_game.sh) the same steps give Metroid Prime 4 Beyond_code.so, compiled with the system's gcc and with
 linux/lx_compat.h force-included, so the patched (Windows) sources compile unchanged.
@@ -40,6 +43,93 @@ def log(s):
 
 class Fail(Exception):
     pass
+
+
+# ------------------------------------------------------------------ .xci / .nsp files
+def key_candidates():
+    home = os.path.expanduser('~')
+    if WIN:
+        ad = os.environ.get('APPDATA', '')
+        dirs = [os.path.join(home, '.switch')] + [os.path.join(ad, *p) for p in (('Ryujinx', 'system'), ('yuzu', 'keys'), ('suyu', 'keys'),
+                                                                               ('sudachi', 'keys'), ('citron', 'keys'), ('eden', 'keys'))]
+    else:
+        cfg = os.environ.get('XDG_CONFIG_HOME') or os.path.join(home, '.config')
+        dat = os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local', 'share')
+        dirs = [os.path.join(home, '.switch'), os.path.join(cfg, 'Ryujinx', 'system')] + \
+               [os.path.join(dat, e, 'keys') for e in ('yuzu', 'suyu', 'sudachi', 'citron', 'eden')]
+    return dirs
+
+
+def find_keys(given):
+    """the player's prod.keys (and title.keys beside it, if any): --keys, SWR_KEYS, else where emulators keep them"""
+    for p in (given, os.environ.get('SWR_KEYS', '')):
+        if p:
+            p = os.path.join(p, 'prod.keys') if os.path.isdir(p) else p
+            if not os.path.isfile(p):
+                raise Fail('The keys file does not exist: %s' % p)
+            return p
+    for d in key_candidates():
+        if os.path.isfile(os.path.join(d, 'prod.keys')):
+            return os.path.join(d, 'prod.keys')
+    raise Fail('Your Switch keys (prod.keys) were not found. A .xci or .nsp is encrypted: dump the keys from your own Switch '
+               '(Lockpick_RCM) and put prod.keys in %s. Or extract the game with an emulator and choose the folder instead.'
+               % key_candidates()[0])
+
+
+def unpack_files(a, out, name):
+    """the game and/or update chosen as .xci / .nsp files: unpacked into <name>_files (exefs + romfs), which then counts
+    as the game folder. An update's RomFS is a patch over the game's, so with an update file the game must be a file too,
+    and the result is the updated game (no separate update folder). Returns that folder, or None (folders were chosen)"""
+    base_file, upd_file = os.path.isfile(a.base), bool(a.update) and os.path.isfile(a.update)
+    if not base_file and not upd_file:
+        return None
+    if upd_file and not base_file:
+        raise Fail('An update file (.nsp) is a patch over the game: choose the game as a file (.xci or .nsp) too.')
+    keys = find_keys(a.keys)
+    tkeys = os.path.join(os.path.dirname(keys), 'title.keys')
+    src = a.update if upd_file else a.base
+    exe = os.environ.get('SWR_RUNTIME_EXE') or os.path.join(out, name + ('.exe' if WIN else ''))
+    if not os.path.isfile(exe):
+        raise Fail('The game program is missing next to the setup (%s): it unpacks .xci / .nsp files.' % exe)
+    stage = os.path.join(out, name + '_files')
+    stamp = json.dumps({'reader': 1, 'src': src, 'src_size': os.path.getsize(src), 'src_time': int(os.path.getmtime(src)),
+                        'base': a.base if upd_file else '', 'base_size': os.path.getsize(a.base) if upd_file else 0})
+    marker = os.path.join(stage, '.unpacked')
+    if os.path.isfile(marker) and open(marker).read() == stamp:
+        log('Game files: already unpacked from %s' % src)
+        return stage
+    need = os.path.getsize(a.base) + 3 * 2**30
+    free = shutil.disk_usage(out).free
+    if free < need:
+        raise Fail('Not enough free space on the drive of %s to unpack the game: %.1f GB free, about %.0f GB needed.' % (out, free / 2**30, need / 2**30))
+    shutil.rmtree(stage, ignore_errors=True); os.makedirs(stage)
+    cmd = [exe, '--nx-extract', '--keys', keys, '--program', '%016X' % TITLE_ID, '--out', stage]
+    if os.path.isfile(tkeys):
+        cmd += ['--title-keys', tkeys]
+    if upd_file:
+        cmd += ['--base', a.base]
+    cmd.append(src)
+    log('Unpacking %s%s with the keys in %s' % (src, (' over ' + a.base) if upd_file else '', keys))
+    import subprocess
+    pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+    err = None
+    for ln in pr.stdout:
+        ln = ln.rstrip('\n')
+        if ln.startswith('@@P '):
+            pct, _, rest = ln[4:].partition(' ')
+            try:
+                P(0.5 + float(pct) * 0.115, 'Unpacking the game file', rest.partition('|')[2])
+            except ValueError:
+                pass
+        elif ln.startswith('@@E '):
+            err = ln[4:]
+        else:
+            log(ln)
+    if pr.wait() != 0 or err:
+        raise Fail(err or 'Unpacking %s failed (exit code %d).' % (src, pr.returncode))
+    with open(marker, 'w') as f:
+        f.write(stamp)
+    return stage
 
 
 # ------------------------------------------------------------------ ExeFS
@@ -130,8 +220,8 @@ def pick_exefs(base, update):
                    'your copy with the latest update applied, then choose the folder that holds them.')
     what, bid = seen[0]
     raise Fail('The %s has Metroid Prime 4 Beyond, but not version %s (its main has build ID %s). '
-               'Most likely this is the base game or another update: choose the extracted update as "Update folder", or extract the game '
-               'with the update applied.'
+               'Most likely this is the base game or another update: choose the update as well (its .nsp file, or its extracted folder), '
+               'or extract the game with the update applied.'
                % (what, VERSION, (bid or 'unknown')[:16] + '...'))
 
 
@@ -309,6 +399,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', required=True); ap.add_argument('--name', default='Metroid Prime 4 Beyond')
     ap.add_argument('--base', required=True); ap.add_argument('--update', default='')
+    ap.add_argument('--keys', default='')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
     out, name = os.path.abspath(a.out), a.name
@@ -320,6 +411,9 @@ def main():
         log('Update folder: %s' % a.update)
     try:
         P(0.5, 'Checking game files', 'ExeFS')
+        unpacked = unpack_files(a, out, name)
+        if unpacked:
+            a.base, a.update = unpacked, ''
         if not os.path.isdir(a.base):
             raise Fail('The game folder does not exist: %s' % a.base)
         if a.update and not os.path.isdir(a.update):
@@ -338,7 +432,7 @@ def main():
             raise Fail('Not enough free space on the drive of %s: %.1f GB free, about %.0f GB needed.' % (out, free / 2**30, need / 2**30))
         P(2, 'Checking game files', 'Metroid Prime 4 Beyond %s' % VERSION)
 
-        assemble_romfs(base_romfs, upd_romfs, os.path.join(data, 'romfs'), 2, 22)
+        assemble_romfs(base_romfs, upd_romfs, os.path.join(data, 'romfs'), 12 if unpacked else 2, 22)
 
         ex_dst = os.path.join(data, 'exefs'); os.makedirs(ex_dst, exist_ok=True)
         if os.path.samefile(exefs, ex_dst):
@@ -427,6 +521,8 @@ def main():
             json.dump({'game': 'Metroid Prime 4 Beyond', 'title_id': '%016X' % TITLE_ID, 'version': VERSION, 'build_id': BUILD_ID,
                        'format': SETUP_FORMAT, 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
                        'dll_sha256': hashlib.sha256(open(dll, 'rb').read()).hexdigest()}, f, indent=1)
+        if unpacked:   # the RomFS files are hard links (or copies) in the game's data now: the unpacked ones can go
+            shutil.rmtree(unpacked, ignore_errors=True)
         P(100, 'Done', '')
         log('Setup complete.')
         print('@@D', flush=True)

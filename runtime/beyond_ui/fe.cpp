@@ -226,16 +226,29 @@ static void setup_screen(ImVec2 a, ImVec2 b) {
     if (g_ss == SS_WELCOME) {
         page_title("FIRST-TIME SETUP", "This turns your own copy of Metroid Prime 4 Beyond (Switch build RS15) into a native PC game. "
                    "Nothing from Nintendo is included: you provide the game files, and they are compiled on this PC with the bundled GCC. "
-                   "It takes a few minutes and needs about 7 GB of free space here.");
+                   "It takes a few minutes and needs about 30 GB of free space here.");
         section("YOUR GAME FILES");
-        std::string bl = g_base.empty() ? "CHOOSE" : g_base; if (bl.size() > 48) bl = "..." + bl.substr(bl.size() - 45);
-        if (row_button("##base", "Game folder (with exefs and romfs)", bl.c_str())) { std::string p = pick_folder(g_hwnd, "Choose your extracted Metroid Prime 4 Beyond folder"); if (!p.empty()) { g_base = p; set("setup_base", p); } }
-        help_text("Dump the game from your own Switch and extract it with its latest update applied (or use an emulator's Extract RomFS / Extract ExeFS with the update installed). "
-                  "The folder can hold exefs and romfs folders, or the extracted files directly (main, main.npdm, Worlds, UI, Kernel.pak ...).");
-        std::string ul = g_update.empty() ? "OPTIONAL" : g_update; if (ul.size() > 48) ul = "..." + ul.substr(ul.size() - 45);
-        if (row_button("##upd", "Update folder (if extracted separately)", ul.c_str())) { std::string p = pick_folder(g_hwnd, "Choose the extracted update folder"); g_update = p; set("setup_update", p); }
-        help_text("Only if your base game and its update were extracted to separate folders. The update's ExeFS is used, and its RomFS files are "
-                  "layered over the base game's. Every file is then checked against the supported build's file list, so a partial or unmerged update is caught.");
+        // each one a .xci / .nsp file (unpacked with your prod.keys by setup) or an extracted folder
+        auto shown = [](const std::string& v, bool file, const char* none) { if (v.empty() || file_exists(v) != file) return std::string(none);
+            return v.size() > 48 ? "..." + v.substr(v.size() - 45) : v; };
+#ifdef _WIN32
+        const wchar_t* spec = L"*.xci;*.nsp";
+#else
+        const wchar_t* spec = L"*.xci *.nsp *.XCI *.NSP";
+#endif
+        if (row_button("##basef", "Game file (.xci or .nsp)", shown(g_base, true, "CHOOSE").c_str())) {
+            std::string p = pick_file(g_hwnd, "Choose your Metroid Prime 4 Beyond game file", L"Switch game", spec); if (!p.empty()) { g_base = p; set("setup_base", p); } }
+        if (row_button("##base", "...or an extracted game folder (exefs and romfs)", shown(g_base, false, "CHOOSE").c_str())) {
+            std::string p = pick_folder(g_hwnd, "Choose your extracted Metroid Prime 4 Beyond folder"); if (!p.empty()) { g_base = p; set("setup_base", p); } }
+        help_text("Dump the game from your own Switch: the cartridge as .xci or the eShop version as .nsp (DBI, nxdumptool). Files are decrypted with the keys "
+                  "of your own Switch (prod.keys from Lockpick_RCM, in ~/.switch or where Ryujinx or yuzu keep them). Or extract the game with its update "
+                  "applied and choose the folder: it can hold exefs and romfs folders, or the files directly (main, main.npdm, Worlds, UI, Kernel.pak ...).");
+        if (row_button("##updf", "Update file (.nsp)", shown(g_update, true, "OPTIONAL").c_str())) {
+            std::string p = pick_file(g_hwnd, "Choose the update file (.nsp)", L"Switch update", spec); g_update = p; set("setup_update", p); }
+        if (row_button("##upd", "...or an extracted update folder", shown(g_update, false, "OPTIONAL").c_str())) {
+            std::string p = pick_folder(g_hwnd, "Choose the extracted update folder"); g_update = p; set("setup_update", p); }
+        help_text("The game needs its latest update. An update file is applied to the game file (choose the game as a file too); an update folder's "
+                  "ExeFS is used and its RomFS files are layered over the game's. Every file is then checked against the supported build's file list.");
         if (!g_old.empty()) {
             section("BRING OVER FROM YOUR EXISTING INSTALLATION");
             const OldInstall& o = g_old[0];

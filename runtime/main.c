@@ -717,6 +717,8 @@ static void split_path(const char* argv0){
 }
 
 int swr_main(int argc, char** argv){
+  /* setup's game-file reader (nxextract.c): an .xci / .nsp to exefs + romfs folders, then exit */
+  if(argc>1 && !strcmp(argv[1],"--nx-extract")){ extern int nx_extract_main(int,char**); return nx_extract_main(argc-1,argv+1); }
   split_path(argv[0]);
   char ini[1400];
   snprintf(ini,sizeof ini,"%s%s.ini",g_exedir,g_exename);

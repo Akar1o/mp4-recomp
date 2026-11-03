@@ -48,11 +48,17 @@ Everything that changed is listed below.
 - **SDL2** (controllers and audio) and **zlib**, which most distributions already ship.
 - **For the game's videos:** OpenH264 2.x (`openh264` / `libopenh264`), or FFmpeg's `libavcodec` (faster, preferred when
   present). VA-API hardware decoding is used when available. Without any of these, videos stay black.
-- **Your game dump:** *Metroid Prime 4: Beyond* for Switch, program `010019A01E2F2000`, main build ID
-  `8275FBE1EC5191C279F3A943AD8524F4BAB087A3`, extracted to an **ExeFS** (`main`, `main.npdm`, `rtld`, `sdk`, `subsdk*`)
-  and a **RomFS** folder (`Worlds/`, `UI/`, `Preload/`, `Kernel.pak`, …), with the matching update applied. Setup checks
-  the build ID and verifies all 445 RomFS files (26.9 GB) against the manifest.
-- About 30 GB of free disk space for the installed game data, plus space for shader caches.
+- **Your game dump:** *Metroid Prime 4: Beyond* for Switch, program `010019A01E2F2000`, with the update whose main has build
+  ID `8275FBE1EC5191C279F3A943AD8524F4BAB087A3` (the cartridge alone is build `E860CBED…` and is refused). Either:
+  - the **files** from your Switch: the game as `.xci` (cartridge) or `.nsp` (eShop) and the update as `.nsp` (DBI or
+    nxdumptool), plus your Switch's **`prod.keys`** (Lockpick_RCM) in `~/.switch/`, or where Ryujinx or yuzu keep it.
+    Setup decrypts them with those keys and applies the update to the game; or
+  - an **extracted** ExeFS (`main`, `main.npdm`, `rtld`, `sdk`, `subsdk*`) and RomFS (`Worlds/`, `UI/`, `Preload/`,
+    `Kernel.pak`, …) with the update applied.
+
+  Setup checks the build ID and verifies all 445 RomFS files (26.9 GB) against the manifest.
+- About 30 GB of free disk space for the installed game data, plus space for shader caches (from `.xci` / `.nsp` files the
+  same: the unpacked files become the installed ones).
 
 ## Install and play
 
@@ -68,8 +74,9 @@ Everything that changed is listed below.
    ./Metroid_Prime_4_Recomp-x86_64.AppImage
    ```
 
-3. **First run:** the setup screen asks for your extracted game folder (it can hold `exefs` and `romfs` folders, or the
-   files directly), and an update folder if you extracted the update separately. Setup verifies the files, copies them
+3. **First run:** the setup screen asks for your game: its `.xci` / `.nsp` file and the update's `.nsp`, or an extracted
+   game folder (it can hold `exefs` and `romfs` folders, or the files directly) and an update folder if you extracted the
+   update separately. Setup verifies the files, copies them
    into the install folder and compiles the game with the bundled GCC (a few minutes on a fast CPU).
 4. Press **Play**. The first launch builds shaders in the background; later launches load them from the cache.
 
@@ -252,6 +259,8 @@ from the same save), traced to a root cause and checked again in the game.
 - `fsp-srv` 205 (`OpenDataStorageWithProgramIndex`): the game mounts its RomFS.
 - HID: player 1 reports a single controller style, fixing the six-axis abort at boot.
 - The Play screen checks for Prime 4's data and shows Prime 4's titles.
+- Setup takes the game's `.xci` / `.nsp` and the update's `.nsp` directly, decrypted with your own `prod.keys`, and applies
+  the update's RomFS patch (BKTR) itself: no emulator needed to extract them.
 - The AppImage runs on any x86-64 CPU: its program is built with the bundled toolchain instead of the build
   machine's, which had made it need AVX-512 and glibc 2.43 ("CPU ISA level is lower than required" on a Steam Deck).
 - Cheats in Atmosphere / dmnt format, toggled per cheat in the in-game menu.
