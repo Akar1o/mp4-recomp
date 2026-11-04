@@ -150,6 +150,8 @@ def release(out, exe, version):
         cp(os.path.join(ROOT, f), os.path.join(rc, f))
     cp(os.path.join(ROOT, 'beyond', 'beyond_setup.py'), os.path.join(rc, 'beyond_setup.py'))
     for f in ('beyond_patches.json', 'romfs_beyond.manifest'):
+        # no game-code patches yet: setup compiles the code as translated when the file is absent
+        if f == 'beyond_patches.json' and not os.path.isfile(os.path.join(ROOT, 'beyond', f)): continue
         cp(os.path.join(ROOT, 'beyond', f), os.path.join(rc, 'beyond', f))
     for f in ('cpu.h', 'cpu_helpers.c'):
         cp(os.path.join(ROOT, 'runtime', f), os.path.join(rc, 'runtime', f))

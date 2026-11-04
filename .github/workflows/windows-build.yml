@@ -1,0 +1,72 @@
+# Builds the Windows release (runtime EXE + recompiler + bundled GCC and Python) from this repository, the way
+# build.bat does, with the toolchain it expects: winlibs GCC 14.2.0 (UCRT, POSIX threads) in gcc\Library, Python 3.12
+# embeddable in python\, and redist\zlib1.dll + redist\SDL2.dll. The native Vulkan renderer (ScarletNX) is left out,
+# as the game renders with OpenGL by default; that also removes the glslang requirement.
+name: windows-build
+
+on:
+  push:
+    branches: [windows-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    env:
+      VERSION: '2026.11.2'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (winlibs GCC 14.2.0 UCRT, Python 3.12 embeddable, SDL2, zlib)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gcc_url=$(gh api --paginate 'repos/brechtsanders/winlibs_mingw/releases?per_page=100' \
+            --jq '.[] | select(.tag_name | test("^14\\.2\\.0posix-.*-ucrt-r[0-9]+$")) | .assets[]
+                  | select(.name | test("^winlibs-x86_64-posix-seh-gcc-14\\.2\\.0-mingw-w64ucrt-[0-9.]+-r[0-9]+\\.zip$"))
+                  | .browser_download_url' | head -n 1)
+          test -n "$gcc_url" || { echo "winlibs GCC 14.2.0 UCRT zip not found"; exit 1; }
+          echo "GCC: $gcc_url"
+          curl -fsSL --retry 3 -o gcc.zip "$gcc_url"
+          7z x -y -ogcc-tmp gcc.zip > /dev/null
+          mkdir -p gcc && mv gcc-tmp/mingw64 gcc/Library
+          test -f gcc/Library/bin/gcc.exe && test -f gcc/Library/version_info.txt
+
+          curl -fsSL --retry 3 -o python.zip https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
+          7z x -y -opython python.zip > /dev/null
+          cp python/LICENSE.txt python/LICENSE_PYTHON.txt
+
+          sdl_url=$(gh api --paginate 'repos/libsdl-org/SDL/releases?per_page=100' \
+            --jq '.[] | select(.tag_name | test("^release-2\\.[0-9]+\\.[0-9]+$")) | .assets[]
+                  | select(.name | test("^SDL2-2\\.[0-9.]+-win32-x64\\.zip$")) | .browser_download_url' | head -n 1)
+          test -n "$sdl_url" || { echo "SDL2 win32-x64 zip not found"; exit 1; }
+          echo "SDL2: $sdl_url"
+          curl -fsSL --retry 3 -o sdl.zip "$sdl_url"
+          mkdir -p redist && 7z e -y -oredist sdl.zip SDL2.dll > /dev/null
+          cp gcc/Library/bin/zlib1.dll redist/zlib1.dll
+          ls -la redist
+
+      - name: Build
+        shell: cmd
+        run: |
+          set "PATH=%CD%\gcc\Library\bin;%PATH%"
+          python\python.exe work-profiler\build_imgui.py || exit /b 1
+          set SWR_RELEASE=1
+          set SWR_NO_SNXVK=1
+          python\python.exe switchrecomp.py --build-runtime --cc "%CD%\gcc\Library\bin\gcc.exe" || exit /b 1
+          if not exist bin\runtime_win64_win32.exe exit /b 1
+          python\python.exe beyond\make_release.py release release\out --version %VERSION% --exe bin\runtime_win64_win32.exe || exit /b 1
+          dir "release\out\Metroid Prime 4 Beyond"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: MetroidPrime4Recomp-Windows
+          path: release/out/Metroid Prime 4 Beyond/
+          if-no-files-found: error
+          retention-days: 7
